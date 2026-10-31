@@ -12,7 +12,7 @@
     "test": "node --test --test-force-exit --test-timeout=60000 \"dist/test/**/*.test.js\""
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/node": "^26.6.5",
     "autocannon": "^8.0.0",
     "typescript": "^5.9.0"
   }
