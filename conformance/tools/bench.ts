@@ -1,6 +1,6 @@
 // 入り口 (nginx か edge) に負荷をかけて、毎秒の数と待ち時間を測る。
 // 使い方 (Docker の minecraft-network の中で):
-//   node dist/tools/bench.js --target toro-edge:80 --label edge --scenarios scenarios.json [--seconds 8] [--connections 64]
+//   node dist/tools/bench.js --target toro-edge:80 --label edge --scenarios scenarios.json [--seconds 8] [--connections 64] [--workers 2]
 // scenarios.json: [{ "name": "...", "host": "map.torosaba.net", "path": "/css/dynmap_style.css", "headers": { ... } }, ...]
 //   "paths": [...] を書くと、その中から順に取る。"conditional": true なら、先に 1 度取って ETag を If-None-Match に付ける (304 の経路)
 import http from 'node:http'
@@ -14,6 +14,8 @@ const label = args.get('label') ?? target
 const seconds = Number(args.get('seconds') ?? 8)
 const connections = Number(args.get('connections') ?? 64)
 const only = args.get('only')
+// 負荷をかける側が先に頭打ちにならないよう、CPU を増やすときは workers も増やす
+const workers = Number(args.get('workers') ?? 2)
 const [targetHost, targetPort] = target.split(':')
 
 interface Scenario {
@@ -60,7 +62,7 @@ for (const s of scenarios) {
     url: `http://${targetHost}:${targetPort ?? 80}`,
     connections,
     duration: seconds,
-    workers: 2,
+    workers,
     requests,
     timeout: 20,
   })

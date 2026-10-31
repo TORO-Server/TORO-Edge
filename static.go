@@ -106,6 +106,7 @@ func (r *rec) entity(rules *StaticRules) *Entity {
 	e := r.entities[rules]
 	if e == nil {
 		e = newEntity(entityInit{status: 200, typ: r.typ, body: r.body, etag: r.etag, lastModified: r.lastMod, headers: rules.headers, tier: tierBest})
+		e.attachFiles()
 		r.entities[rules] = e
 		e.warm()
 	}

@@ -29,6 +29,7 @@ type Edge struct {
 
 func startEdge(cfg Config, out io.Writer) (*Edge, error) {
 	debugHeaders = cfg.DebugHeaders
+	sendfileMin = cfg.SendfileMin
 	e := &Edge{
 		cfg:    cfg,
 		cache:  newEntityCache(cfg.CacheBytes),

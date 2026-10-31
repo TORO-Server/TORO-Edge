@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -136,6 +137,8 @@ type conn struct {
 	idle atomic.Bool
 	// この返事のあとで、つなぎを閉じる
 	closeAfter bool
+	// sendfile に使う raw 口 (必要になったとき求める)
+	rc syscall.RawConn
 	// writev に渡す並び (返事ごとに作り直さない)
 	iov     [6][]byte
 	bufs    net.Buffers

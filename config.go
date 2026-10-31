@@ -37,6 +37,8 @@ type Config struct {
 	DebugHeaders bool
 	// 止めるとき、返し終えていないものを待つ時間 (ミリ秒)
 	ShutdownGraceMs int
+	// この大きさ (バイト) 以上の本文は、メモリ上のファイルから sendfile で送る (0 なら使わない)
+	SendfileMin int
 }
 
 func envOr(env map[string]string, key, fallback string) string {
@@ -116,6 +118,7 @@ func loadConfig(env map[string]string) Config {
 		AccessLog:       env["EDGE_ACCESS_LOG"] != "0",
 		DebugHeaders:    env["EDGE_DEBUG_HEADERS"] == "1",
 		ShutdownGraceMs: envInt(env, "EDGE_SHUTDOWN_GRACE_MS", 10000),
+		SendfileMin:     envInt(env, "EDGE_SENDFILE_MIN", 64<<10),
 	}
 }
 

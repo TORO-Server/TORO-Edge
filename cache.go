@@ -91,6 +91,7 @@ func (c *EntityCache) removeLocked(e *Entity) {
 	c.total -= int64(e.bytes())
 	c.order.Remove(e.elem)
 	e.elem = nil
+	e.retire()
 	e.ns.m.CompareAndDelete(e.key, e)
 }
 
@@ -116,7 +117,7 @@ func (e *Entity) publish(s *slot, v *Variant) {
 	c.mu.Lock()
 	s.v.Store(v)
 	if e.elem != nil {
-		c.total += int64(len(v.body) + len(v.head))
+		c.total += int64(v.mem())
 		c.evictLocked()
 	}
 	c.mu.Unlock()

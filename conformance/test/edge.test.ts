@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
+import { once } from 'node:events'
 import http from 'node:http'
+import net from 'node:net'
 import type { Socket } from 'node:net'
 import { test } from 'node:test'
 import { brotliDecompressSync, gunzipSync, gzipSync } from 'node:zlib'
+import type { Env, Reply } from './helpers.js'
 import { CSS, echoUpgrade, INDEX_HTML, request, SETTINGS_JSON, sleep, withEnv } from './helpers.js'
 
 // 実装の言語によらない適合試験: 偽の元のサーバーと一時フォルダを用意して、実行ファイル (EDGE_BIN) を外から確かめる。
@@ -587,6 +591,149 @@ test('エラーの返事: 404 に Cache-Control を付けない。付け足す�
     await env.blue('/_nuxt/old-chunk.js')
     assert.equal(env.mapweb.hitCount('/_nuxt/old-chunk.js'), 1)
   })
+})
+
+/** 1 本のつなぎ (keep-alive) で、順に取る。返事ごとに、同じつなぎだったかも返す */
+async function sequence(port: number, host: string, items: { path: string, method?: string, headers?: Record<string, string> }[]): Promise<{ replies: Reply[], sameSocket: boolean }> {
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+  const sockets = new Set<unknown>()
+  const replies: Reply[] = []
+  try {
+    for (const it of items) {
+      replies.push(await new Promise<Reply>((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, path: it.path, method: it.method ?? 'GET', headers: { host, ...it.headers }, agent }, (res) => {
+          sockets.add(res.socket)
+          const chunks: Buffer[] = []
+          res.on('data', (c: Buffer) => chunks.push(c))
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }))
+          res.on('error', reject)
+        })
+        req.on('error', reject)
+        req.end()
+      }))
+    }
+  }
+  finally {
+    agent.destroy()
+  }
+  return { replies, sameSocket: sockets.size === 1 }
+}
+
+/** 大きい本文 (sendfile の対象) を、いろいろな形で何度取っても、同じ中身で返ること */
+async function checkBigBodies(env: Env): Promise<void> {
+  const json = JSON.stringify({ sets: Array.from({ length: 6000 }, (_, i) => ({ id: `marker-${i}`, label: 'station', x: i, y: 64, z: -i })) })
+  assert.ok(json.length > 200_000)
+  const tile = randomBytes(300_000)
+  env.mapweb.handler = (req, res) => {
+    if (req.url === '/up/configuration') {
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' })
+      res.end(json)
+      return
+    }
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'public, max-age=300', 'etag': '"t1"' })
+    res.end(tile)
+  }
+  const tilePath = '/maps/overworld/tiles/0/x0/z0.prbm'
+  for (let i = 0; i < 3; i++) {
+    const br = await env.get('/up/configuration', { headers: { 'accept-encoding': 'br, gzip' } })
+    assert.equal(br.headers['content-encoding'], 'br')
+    assert.equal(br.headers['content-length'], String(br.body.length))
+    assert.equal(text(brotliDecompressSync(br.body)), json)
+    const gz = await env.get('/up/configuration', { headers: { 'accept-encoding': 'gzip' } })
+    assert.equal(gz.headers['content-encoding'], 'gzip')
+    assert.equal(text(gunzipSync(gz.body)), json)
+    const plain = await env.get('/up/configuration')
+    assert.equal(plain.headers['content-encoding'], undefined)
+    assert.equal(text(plain.body), json)
+    const t = await env.blue(tilePath, { headers: { 'accept-encoding': 'gzip' } })
+    assert.equal(t.headers['content-length'], String(tile.length))
+    assert.ok(t.body.equals(tile))
+  }
+  assert.equal(env.mapweb.hitCount('/up/configuration'), 1)
+  assert.equal(env.mapweb.hitCount(tilePath), 1)
+
+  // HEAD は頭書きだけ。条件付きは 304
+  const head = await env.blue(tilePath, { method: 'HEAD' })
+  assert.equal(head.status, 200)
+  assert.equal(head.headers['content-length'], String(tile.length))
+  assert.equal(head.body.length, 0)
+  assert.equal((await env.blue(tilePath, { headers: { 'if-none-match': '"t1"' } })).status, 304)
+
+  // 大きい返事のあとも、同じつなぎで次の返事が正しく届く (框組みが崩れていない)
+  const seq = await sequence(env.edge.port, '3d-map.torosaba.net', [
+    { path: tilePath },
+    { path: '/assets/a.png' },
+    { path: tilePath, method: 'HEAD' },
+    { path: tilePath },
+    { path: tilePath, headers: { 'if-none-match': '"t1"' } },
+    { path: tilePath },
+  ])
+  assert.ok(seq.sameSocket)
+  const [a, s, h, b, n, c] = seq.replies as [Reply, Reply, Reply, Reply, Reply, Reply]
+  assert.ok(a.body.equals(tile))
+  assert.deepEqual(s.body, Buffer.from([1, 2, 3]))
+  assert.equal(h.body.length, 0)
+  assert.ok(b.body.equals(tile))
+  assert.equal(n.status, 304)
+  assert.ok(c.body.equals(tile))
+}
+
+test('sendfile: 大きい本文 (そのまま・gzip・brotli) を、何度でも・HEAD や 304 や続きのリクエストと混ぜても、正しく返す', async () => {
+  await withEnv(checkBigBodies)
+})
+
+test('sendfile を使わない設定 (EDGE_SENDFILE_MIN=0) でも、同じ返事になる', async () => {
+  await withEnv(checkBigBodies, { sendfileMin: 0 })
+})
+
+test('sendfile: 読むのが遅い客にも、全部を正しく送る (書けるまで待つ)', async () => {
+  await withEnv(async (env) => {
+    const big = randomBytes(20_000_000)
+    env.mapweb.handler = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'public, max-age=300' })
+      res.end(big)
+    }
+    const url = '/maps/overworld/tiles/0/x1/z1.prbm'
+    assert.ok((await env.blue(url)).body.equals(big))
+    const sock = net.connect(env.edge.port, '127.0.0.1')
+    await once(sock, 'connect')
+    sock.write(`GET ${url} HTTP/1.1\r\nHost: 3d-map.torosaba.net\r\nConnection: close\r\n\r\n`)
+    // 読まずに待つ (送る側の送信用のバッファと、こちらの受信用のバッファが、いっぱいになる)
+    await sleep(600)
+    const chunks: Buffer[] = []
+    sock.on('data', c => chunks.push(c))
+    await once(sock, 'end')
+    const all = Buffer.concat(chunks)
+    const split = all.indexOf('\r\n\r\n')
+    assert.ok(split > 0)
+    assert.ok(text(all.subarray(0, split)).startsWith('HTTP/1.1 200'))
+    assert.ok(all.subarray(split + 4).equals(big))
+  }, { maxEntityBytes: 32 * 1024 * 1024 })
+})
+
+test('sendfile: 送っている最中に別の客が来ても、捨てられても、どの返事も壊れない', async () => {
+  await withEnv(async (env) => {
+    const bodies = Array.from({ length: 10 }, () => randomBytes(300_000))
+    env.mapweb.handler = (req, res) => {
+      const i = Number(/z(\d+)\.prbm/.exec(req.url ?? '')?.[1] ?? 0)
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'public, max-age=300' })
+      res.end(bodies[i])
+    }
+    // 上限 (1MB) を何度も超える。同時に、いろいろなものを取る
+    const jobs: Promise<void>[] = []
+    for (let round = 0; round < 6; round++) {
+      for (let i = 0; i < bodies.length; i++) {
+        const k = (i * 7 + round * 3) % bodies.length
+        jobs.push(env.blue(`/maps/overworld/tiles/0/x0/z${k}.prbm`).then((r) => {
+          assert.equal(r.status, 200)
+          assert.ok(r.body.equals(bodies[k]!), `tile ${k}`)
+        }))
+      }
+      if (round % 2 === 1) await Promise.all(jobs.splice(0))
+    }
+    await Promise.all(jobs)
+    assert.ok((await env.cacheStats()).bytes <= 1024 * 1024)
+  }, { cacheBytes: 1024 * 1024, maxEntityBytes: 512 * 1024 })
 })
 
 test('管理用ポート: /healthz /stats /purge', async () => {

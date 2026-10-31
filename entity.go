@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/andybalholm/brotli"
@@ -36,13 +38,48 @@ const (
 
 var gates = [2]chan struct{}{make(chan struct{}, 4), make(chan struct{}, 2)}
 
+// sendfileMin はこの大きさ以上の本文を、メモリ上のファイルに置いて sendfile で送る (0 なら使わない。EDGE_SENDFILE_MIN)
+var sendfileMin = 64 << 10
+
+// fileGrace は捨てた返事のファイルを閉じるまでの待ち。送っている最中のものがあっても、書き込みの時間切れ (writeTimeout) より長く待つ
+const fileGrace = 2*writeTimeout + 30*time.Second
+
 // Variant は 1 つの表現 (そのまま、gzip、brotli)
 type Variant struct {
 	encoding string
-	body     []byte
-	etag     string
+	// file があるときの gzip / brotli の版は、本文をここに持たない (file だけに置く)
+	body []byte
+	size int
+	etag string
 	// 状態の行から頭書きまで (Date と最後の空行は送るときに付ける)。そのまま writev に渡す
 	head []byte
+	// 大きい本文のメモリ上のファイル (sendfile で送る)。なければ nil
+	file   *os.File
+	fileRC syscall.RawConn
+}
+
+// mem はこの版がメモリに置いている大きさ
+func (v *Variant) mem() int {
+	n := len(v.body) + len(v.head)
+	if v.file != nil {
+		n += v.size
+	}
+	return n
+}
+
+// attachFile は大きい本文をメモリ上のファイルにも置く。drop なら、本文はファイルだけに置く
+func (v *Variant) attachFile(drop bool) {
+	if v.file != nil || sendfileMin <= 0 || v.size < sendfileMin {
+		return
+	}
+	f, rc := newBodyFile(v.body)
+	if f == nil {
+		return
+	}
+	v.file, v.fileRC = f, rc
+	if drop {
+		v.body = nil
+	}
 }
 
 // slot は圧縮した版の置き場 (最初に求められたとき 1 度だけ裏で作る)
@@ -91,6 +128,8 @@ type Entity struct {
 
 	init   entityInit
 	varies bool
+	// 大きい本文をメモリ上のファイルにも置く (attachFiles のあと。キャッシュや静的なファイルに入れるもの)
+	files bool
 
 	// キャッシュに入っているあいだ (cache.go。ns, key, elem は EntityCache の mu で守る)
 	ns   *nsCache
@@ -128,14 +167,30 @@ func newEntity(init entityInit) *Entity {
 
 // bytes はメモリに置いている大きさ (見積もり)
 func (e *Entity) bytes() int {
-	n := len(e.identity.body) + len(e.identity.head) + 1024
+	n := e.identity.mem() + 1024
 	if v := e.br.v.Load(); v != nil {
-		n += len(v.body) + len(v.head)
+		n += v.mem()
 	}
 	if v := e.gz.v.Load(); v != nil {
-		n += len(v.body) + len(v.head)
+		n += v.mem()
 	}
 	return n
+}
+
+// attachFiles は大きい本文をメモリ上のファイルにも置く。人の目に触れる前 (キャッシュや表に入れる前) に 1 度だけ呼ぶ
+func (e *Entity) attachFiles() {
+	e.files = true
+	e.identity.attachFile(false)
+}
+
+// retire はキャッシュから捨てたとき。送っている最中のものがあるので、少し待ってからファイルを閉じる
+func (e *Entity) retire() {
+	for _, v := range [3]*Variant{e.identity, e.br.v.Load(), e.gz.v.Load()} {
+		if v != nil && v.file != nil {
+			f := v.file
+			time.AfterFunc(fileGrace, func() { f.Close() })
+		}
+	}
 }
 
 func (e *Entity) makeVariant(encoding string, body []byte, etag string) *Variant {
@@ -161,7 +216,7 @@ func (e *Entity) makeVariant(encoding string, body []byte, etag string) *Variant
 	for _, h := range init.headers {
 		b = appendHeader(b, h.k, h.v)
 	}
-	return &Variant{encoding: encoding, body: body, etag: etag, head: b}
+	return &Variant{encoding: encoding, body: body, size: len(body), etag: etag, head: b}
 }
 
 // matchEtag は If-None-Match が、この返事のどの版かに合うか。合えば、その ETag (ETag のない返事は "")
@@ -331,8 +386,14 @@ func (e *Entity) build(br bool) *Variant {
 	if float64(buf.Len()) >= float64(len(body))*0.95 {
 		return nil
 	}
+	var v *Variant
 	if br {
-		return e.makeVariant("br", buf.Bytes(), variantEtag(e.etag, "br"))
+		v = e.makeVariant("br", buf.Bytes(), variantEtag(e.etag, "br"))
+	} else {
+		v = e.makeVariant("gzip", buf.Bytes(), variantEtag(e.etag, "gz"))
 	}
-	return e.makeVariant("gzip", buf.Bytes(), variantEtag(e.etag, "gz"))
+	if e.files {
+		v.attachFile(true)
+	}
+	return v
 }

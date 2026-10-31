@@ -61,6 +61,7 @@ docker pull ghcr.io/<owner>/toro-edge:latest
 | `EDGE_ACCESS_LOG` | 1 | `0` でアクセスログを出さない |
 | `EDGE_DEBUG_HEADERS` | 0 | `1` で返事に `x-edge-cache` を付ける (試験用) |
 | `EDGE_SHUTDOWN_GRACE_MS` | 10000 | 止めるとき、返し終えていないものを待つ時間 |
+| `EDGE_SENDFILE_MIN` | 65536 | この大きさ (バイト) 以上の本文を、メモリ上のファイル (memfd) から `sendfile` で送る。`0` で使わない (Linux だけ) |
 | `EDGE_PPROF` | 0 | `1` で管理用のポートに `/debug/pprof/` を出す |
 | `GOMEMLIMIT` / `GOGC` | `2600MiB` / `200` | Go のメモリの目安 (イメージで設定済み) |
 
@@ -89,13 +90,14 @@ HTTP/1.1 のサーバーも、このプロキシのために作ってありま�
 
 - 読む頭書きは決まったものだけ。折り返し (obs-fold)、LF だけの改行、重複した Content-Length / Host、頭書き名の空白、制御文字は 400。頭書きが 16 KB を超えたら 431、リクエストの行が長すぎたら 414
 - 返事の頭書きは、返事ができたときに文字列にしてあり、返すときは `Date` を足して並べるだけ。頭書きと本文を 1 回の `writev` で送る (標準の `net/http` は 4 KB を超えると 2 回に分けるうえ、毎回頭書きを並べ替える)
+- 64 KB 以上の本文は、メモリ上のファイル (`memfd_create`) にも置いて、`sendfile` で送る。`write` で送ると本文をカーネルへ写す分の CPU がかかる (nginx が速かった大きい本文は、これが理由だった)。ファイルは返事と同じ寿命で、捨てたあとも、送っている最中のものがあるので `2 × writeTimeout + 30 秒` 待ってから閉じる。`sendfile` が使えないときは、読んで `write` で送る
 - キャッシュの検索は `sync.Map` (ヒットのときはロックなし、鍵も作り直さない)。経路の判定は正規表現を使わない。全コアが増やす数は、コアごとにばらして数える
 - 流している返事 (動画、SSE) は、客が切れたら元も切る。止めるときは、新しいつなぎを受けず、返し終えていないものを待つ
 
 | ファイル | |
 |---|---|
 | `httpserver.go` | HTTP/1.1 のサーバー (パース、つなぎ、止め方) |
-| `respond.go` | 返事の送り方 (writev、チャンク、切れたかの見張り) |
+| `respond.go` / `sendfile_*.go` | 返事の送り方 (writev、sendfile、チャンク、切れたかの見張り) |
 | `sites.go` / `router.go` | 経路の決まり |
 | `cached.go` / `cache.go` / `entity.go` | ためる (単一飛行、古いまま返す、304 で延ばす、圧縮した版) |
 | `static.go` | ファイルのストア (読み込み、変更の検知、安全なパス) |
@@ -107,12 +109,12 @@ HTTP/1.1 のサーバーも、このプロキシのために作ってありま�
 ```bash
 go vet ./... && go test -race ./...           # 単体 (パーサーの異常系、パイプライン、チャンク、止め方 ほか)
 go build -o toro-edge .
-cd conformance && npm ci && npm run build && EDGE_BIN=../toro-edge npm test   # 偽の元のサーバーを相手にした 20 件
+cd conformance && npm ci && npm run build && EDGE_BIN=../toro-edge npm test   # 偽の元のサーバーを相手にした 24 件 (sendfile の 4 件を含む)
 ```
 
 `conformance` の試験は実装の言語に依らず、`EDGE_BIN` に実行ファイルを渡すだけで流せます。
 `conformance/tools/parity.ts` は 2 つの入り口に同じ URL・同じ Host で聞いて、返事の違いを集めます (nginx から移すときに、実際に来たパス 1000 件で使いました)。
-`conformance/tools/bench.ts` と `cpuprobe.sh` は、負荷をかけて、入り口のコンテナが使った CPU を 1 リクエストあたりで測ります。
+`conformance/tools/bench.ts` と `cpuprobe.sh` は、負荷をかけて、入り口のコンテナが使った CPU を 1 リクエストあたりで測ります (`cpuprobe.sh` の最後の引数で、負荷をかける側の CPU と workers を増やせます)。`coldpass.ts` は、空のキャッシュに同じ URL を 1 回ずつ取って、元に聞きに行く経路の時間を測ります。
 
 ## 性能 (nginx → Node 版 → この版、2026-10-31、本番ホスト)
 
@@ -137,6 +139,29 @@ cd conformance && npm ci && npm run build && EDGE_BIN=../toro-edge npm test   # 
 毎秒の数 (32 接続) は、小さい返事では Go 版が 1.2〜1.4 倍、大きい本文 (タイル、textures) は負荷をかける側 (autocannon) が先に頭打ちになるので、同じです (css・タイル・混合を Node 版と交互に 3 回ずつ測って、Go 版が同等以上でした)。
 待ち時間 (p99) は同じくらいですが、実際のタイル 70 本の混合だけは、Go 版が 5〜10% 長く出ました (58 / 63 / 69 ms 対 57 / 58 / 62 ms)。
 実際のトラフィックは毎秒数件なので、いちばん効くのは、毎回 TiDB / toro-main / Nuxt まで届いていたものがメモリで終わることです。
+
+### nginx との比較 (同じホスト、同じ設定の nginx:alpine と交互に測定)
+
+| シナリオ | nginx | この版 | 比 |
+|---|---|---|---|
+| html `/` (3d-map) | 135.5 | 11.6 | 9% |
+| タイルの 304 | 23.3 | 10.2 | 44% |
+| ライブ players.json | 134.9 | 11.4 | 8% |
+| 静的 settings.json | 84.7 | 12.4 | 15% |
+| ライブ markers.json (JSON 17 KB) | 1437.9 | 18.5 | 1% |
+| タイル 72 KB (PNG) | 48.7 | 39.8 | 82% |
+| タイル 353 KB (prbm, gzip) | 35.5 | 20.4 | 57% |
+| 実際のタイル 70 本の混合 | 81.5 | 48.0 | 59% |
+| textures.json (588 KB, gzip) | 132.5 | 97.6 | 74% |
+| Dynmap の up/world | 75.4 | 13.5 | 18% |
+| Dynmap の up/configuration | 145.6 | 13.3 | 9% |
+| 静的 css | 435.6 | 15.9 | 4% |
+
+- 大きい本文 (textures.json など) は、`write` で送っていた版 (169 µs) では nginx (132 µs) に負けていた。`sendfile` で 97 µs になり、nginx を下回った
+- 負荷をかける側を強めて (CPU 5・64 接続) 測り直しても、PNG タイル、textures、混合、prbm のどれも、毎秒の数は nginx と同等以上、p99 は同じかそれ以下
+- 接続 1 本の待ち時間 (p99) は、小さい返事が 4〜6 ms (nginx) → 0〜1 ms。ライブ markers は 163 ms → 3 ms
+- 空のキャッシュから取る経路 (元の待ちが大半) は、同時 4 本で同じ、16 本で約 15% 速く、64 本で同じ
+- 負荷をかける側が先に頭打ちになる項目 (大きい本文の毎秒の数) は、差が出ません
 
 ## ライセンス
 

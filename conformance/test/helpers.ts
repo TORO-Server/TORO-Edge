@@ -14,6 +14,8 @@ export interface Config {
   blueMapWeb: string
   cacheBytes: number
   maxEntityBytes: number
+  /** 省略は実装の既定。0 なら、大きい本文も write で送る */
+  sendfileMin?: number
 }
 
 /** 試験の相手の実行ファイル。EDGE_BIN で指す (省略は、リポジトリの直下でビルドした ./toro-edge) */
@@ -119,6 +121,7 @@ async function startBinary(bin: string, config: Config): Promise<EdgeHandle> {
       EDGE_CACHE_BYTES: String(config.cacheBytes),
       EDGE_MAX_ENTITY_BYTES: String(config.maxEntityBytes),
       EDGE_SHUTDOWN_GRACE_MS: '200',
+      ...(config.sendfileMin === undefined ? {} : { EDGE_SENDFILE_MIN: String(config.sendfileMin) }),
     },
     stdio: ['ignore', 'pipe', 'inherit'],
   })
@@ -171,7 +174,7 @@ async function put(root: string, rel: string, content: string | Buffer): Promise
 }
 
 /** 試験用のフォルダ・元のサーバー・edge をひとまとめに用意して、終わったら片づける */
-export async function withEnv(fn: (env: Env) => Promise<void>, overrides: { cacheBytes?: number, maxEntityBytes?: number } = {}): Promise<void> {
+export async function withEnv(fn: (env: Env) => Promise<void>, overrides: { cacheBytes?: number, maxEntityBytes?: number, sendfileMin?: number } = {}): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'edge-test-'))
   const dynDir = join(root, 'dynmap')
   const blueDir = join(root, 'bluemap')
@@ -197,6 +200,7 @@ export async function withEnv(fn: (env: Env) => Promise<void>, overrides: { cach
     blueMapWeb: blueDir,
     cacheBytes: overrides.cacheBytes ?? 64 * 1024 * 1024,
     maxEntityBytes: overrides.maxEntityBytes ?? 8 * 1024 * 1024,
+    sendfileMin: overrides.sendfileMin,
   }
   const edge = await startBinary(EDGE_BIN, config)
   const env: Env = {

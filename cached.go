@@ -126,6 +126,7 @@ func cachedHandler(o CachedOptions) Handler {
 		f := freshness(status, resp.Header, &o)
 		if f.store && (f.ttl > 0 || entity.etag != "") {
 			setFreshness(entity, f, now, &o)
+			entity.attachFiles()
 			o.cache.set(key, entity, now)
 		}
 		return fetched{entity: entity, failed: status >= 500}, nil

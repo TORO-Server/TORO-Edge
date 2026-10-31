@@ -90,7 +90,36 @@ func sendEntity(c *Ctx, e *Entity) {
 	if v == nil {
 		v = e.ensure(c.enc)
 	}
+	if v.file != nil && !c.head {
+		c.writeFile(e.status, v)
+		return
+	}
 	c.write(e.status, v.head, c.debugLine(), v.body)
+}
+
+// writeFile は頭書きを writev で、本文をメモリ上のファイルから sendfile で送る
+func (c *Ctx) writeFile(status int, v *Variant) {
+	cn := c.conn
+	cn.nc.SetWriteDeadline(time.Now().Add(writeTimeout))
+	defer cn.nc.SetWriteDeadline(time.Time{})
+	if err := c.write(status, v.head, c.debugLine(), nil); err != nil {
+		return
+	}
+	sent, err := cn.sendFile(v)
+	c.bytes = sent
+	if err == nil {
+		return
+	}
+	cn.closeAfter = true
+	// sendfile が使えなかった (何も送らないうちに分かった) ときは、読んで write で送る
+	if sent == 0 && !errors.Is(err, os.ErrDeadlineExceeded) {
+		if b, rerr := v.readFile(); rerr == nil {
+			if _, werr := cn.nc.Write(b); werr == nil {
+				c.bytes = int64(len(b))
+				cn.closeAfter = !cn.req.keepAlive
+			}
+		}
+	}
 }
 
 // sendText は本文が短い文字だけの返事 (エラーなど)。extra は 名前, 値, 名前, 値 ...
