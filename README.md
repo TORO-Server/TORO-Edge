@@ -12,15 +12,19 @@ Go 製。標準ライブラリと brotli のライブラリだけで、イメー
 ## イメージ
 
 GitHub Actions が、試験に通ったものだけを GHCR に置きます (linux/amd64 と linux/arm64)。
+リポジトリもイメージ (`ghcr.io/toro-server/toro-edge`) も非公開です。使うサーバーでは、先に `read:packages` だけの Personal access token (classic) で入っておきます。
 
 ```bash
-docker pull ghcr.io/<owner>/toro-edge:latest
+echo "<read:packages だけの PAT>" | docker login ghcr.io -u <GitHub のユーザー名> --password-stdin
+docker pull ghcr.io/toro-server/toro-edge:1.0.0
 ```
+
+タグは、`latest` (main の先頭)、`sha-<短い ID>`、リリース (`v1.2.3` のタグを打つと `1.2.3` と `1.2`) です。サーバーでは、リリースのタグに固定して使います。
 
 ```yaml
 # docker-compose.yaml
   toro-edge:
-    image: ghcr.io/<owner>/toro-edge:latest
+    image: ghcr.io/toro-server/toro-edge:1.0.0
     container_name: toro-edge
     user: "1000:1001"
     restart: unless-stopped
@@ -165,4 +169,4 @@ cd conformance && npm ci && npm run build && EDGE_BIN=../toro-edge npm test   # 
 
 ## ライセンス
 
-未設定です (公開するときに決めます)。
+未設定です (非公開のリポジトリなので、TORO サーバーの中だけで使います。公開するときに決めます)。
