@@ -1,0 +1,19 @@
+{
+  "name": "toro-edge-conformance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "toro-edge の実行ファイルを外から確かめる試験と、nginx との突き合わせ・負荷の道具",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "node --test --test-force-exit --test-timeout=60000 \"dist/test/**/*.test.js\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "autocannon": "^8.0.0",
+    "typescript": "^5.9.0"
+  }
+}
