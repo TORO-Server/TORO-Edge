@@ -1,6 +1,4 @@
 /toro-edge
 /toro-edge.exe
-conformance/node_modules/
-conformance/dist/
 *.test
 *.prof

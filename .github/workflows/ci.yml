@@ -29,26 +29,17 @@ jobs:
 
       - run: go vet ./...
 
-      # データ競合の検出つき (並行処理が多いので)
-      - run: go test -race -count=1 ./...
+      # データ競合の検出つき (並行処理が多いので)。ルートのパッケージだけ (conformance は下で、ビルドした実行ファイルに対して流す)
+      - run: go test -race -count=1 .
 
       - run: go build -trimpath -o toro-edge .
 
       # 実行ファイルを外から確かめる試験 (偽の元のサーバーと一時フォルダ)
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: conformance/package-lock.json
-
       - name: conformance
         working-directory: conformance
         env:
           EDGE_BIN: ${{ github.workspace }}/toro-edge
-        run: |
-          npm ci
-          npm run build
-          npm test
+        run: go test -count=1 .
 
   image:
     needs: test
