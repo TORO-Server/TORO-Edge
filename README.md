@@ -106,19 +106,21 @@ HTTP/1.1 のサーバーも、このプロキシのために作ってありま�
 | `cached.go` / `cache.go` / `entity.go` | ためる (単一飛行、古いまま返す、304 で延ばす、圧縮した版) |
 | `static.go` | ファイルのストア (読み込み、変更の検知、安全なパス) |
 | `stream.go` / `upstream.go` / `ws.go` | ためずに流す、元への接続、WebSocket |
-| `conformance/` | 実行ファイルを外から確かめる試験と、nginx との突き合わせ、負荷の道具 (TypeScript) |
+| `conformance/` | 実行ファイルを外から確かめる試験と、nginx との突き合わせ、負荷の道具 (すべて Go。Node.js は使わない) |
 
 ## 試験
 
 ```bash
-go vet ./... && go test -race ./...           # 単体 (パーサーの異常系、パイプライン、チャンク、止め方 ほか)
+go vet ./... && go test -race .               # 単体 (パーサーの異常系、パイプライン、チャンク、止め方 ほか)
 go build -o toro-edge .
-cd conformance && npm ci && npm run build && EDGE_BIN=../toro-edge npm test   # 偽の元のサーバーを相手にした 24 件 (sendfile の 4 件を含む)
+cd conformance && EDGE_BIN=../toro-edge go test -count=1 .   # 偽の元のサーバーを相手にした 24 件 (sendfile の 4 件を含む)
 ```
 
-`conformance` の試験は実装の言語に依らず、`EDGE_BIN` に実行ファイルを渡すだけで流せます。
-`conformance/tools/parity.ts` は 2 つの入り口に同じ URL・同じ Host で聞いて、返事の違いを集めます (nginx から移すときに、実際に来たパス 1000 件で使いました)。
-`conformance/tools/bench.ts` と `cpuprobe.sh` は、負荷をかけて、入り口のコンテナが使った CPU を 1 リクエストあたりで測ります (`cpuprobe.sh` の最後の引数で、負荷をかける側の CPU と workers を増やせます)。`coldpass.ts` は、空のキャッシュに同じ URL を 1 回ずつ取って、元に聞きに行く経路の時間を測ります。
+`conformance` の試験は実装の言語に依らず、`EDGE_BIN` に実行ファイルを渡すだけで流せます (省略すると、リポジトリの直下をビルドして使います)。
+外の部品は、Go の標準ライブラリと、すでに使っている brotli だけです。
+`conformance/tools/parity` は 2 つの入り口に同じ URL・同じ Host で聞いて、返事の違いを集めます (nginx から移すときに、実際に来たパス 1000 件で使いました)。
+`conformance/tools/bench` と `cpuprobe.sh` は、負荷をかけて、入り口のコンテナが使った CPU を 1 リクエストあたりで測ります (`cpuprobe.sh` の最後の引数で、負荷をかける側の CPU と workers を増やせます)。`coldpass` は、空のキャッシュに同じ URL を 1 回ずつ取って、元に聞きに行く経路の時間を測ります。
+これらの道具は、`docker build -f conformance/tools/Dockerfile -t toro-edge:tools .` で 1 つのイメージにできます。
 
 ## 性能 (nginx → Node 版 → この版、2026-10-31、本番ホスト)
 
