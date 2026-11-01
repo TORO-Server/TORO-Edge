@@ -6,7 +6,7 @@
 # ビルドは常にビルドする側の CPU で行い (--platform=$BUILDPLATFORM)、Go の交差コンパイルで amd64 / arm64 を作る
 # (QEMU の中でコンパイルしない。速く、結果も同じ)
 
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS compile
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS compile
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
