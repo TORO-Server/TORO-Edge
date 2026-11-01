@@ -35,7 +35,7 @@ jobs:
       - run: go build -trimpath -o toro-edge .
 
       # 実行ファイルを外から確かめる試験 (偽の元のサーバーと一時フォルダ)
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
