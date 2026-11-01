@@ -701,7 +701,7 @@ test('sendfile: 読むのが遅い客にも、全部を正しく送る (書け�
     // 読まずに待つ (送る側の送信用のバッファと、こちらの受信用のバッファが、いっぱいになる)
     await sleep(600)
     const chunks: Buffer[] = []
-    sock.on('data', c => chunks.push(c))
+    sock.on('data', (c: Buffer) => chunks.push(c))
     await once(sock, 'end')
     const all = Buffer.concat(chunks)
     const split = all.indexOf('\r\n\r\n')
