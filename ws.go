@@ -28,6 +28,23 @@ func tcpTune(c net.Conn) {
 	}
 }
 
+const wsIdleTimeout = 120 * time.Second
+
+type timeoutConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *timeoutConn) Read(b []byte) (n int, err error) {
+	c.Conn.SetReadDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Read(b)
+}
+
+func (c *timeoutConn) Write(b []byte) (n int, err error) {
+	c.Conn.SetWriteDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Write(b)
+}
+
 // proxyUpgrade はブラウザと元の WebSocket を、つないだあとは何も解かずにそのまま渡す (メッセージの形は知らなくてよい)。
 // 元が 101 を返さなかったら、その返事の状態だけを返して閉じる
 func proxyUpgrade(c *Ctx, target Endpoint, path string) {
@@ -136,11 +153,13 @@ func proxyUpgrade(c *Ctx, target Endpoint, path string) {
 			up.Close()
 		})
 	}
+	tcClient := &timeoutConn{Conn: client, timeout: wsIdleTimeout}
+	tcUp := &timeoutConn{Conn: up, timeout: wsIdleTimeout}
 	go func() {
-		io.Copy(up, client)
+		io.Copy(tcUp, tcClient)
 		end()
 	}()
-	io.Copy(client, up)
+	io.Copy(tcClient, tcUp)
 	end()
 }
 
