@@ -55,7 +55,7 @@ func startEdge(cfg Config, out io.Writer) (*Edge, error) {
 	if err != nil {
 		return nil, err
 	}
-	aln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.AdminPort))
+	aln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.AdminPort))
 	if err != nil {
 		ln.Close()
 		return nil, err
@@ -160,6 +160,15 @@ func (e *Edge) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(status)
 		w.Write(body)
+	}
+	if path != "/healthz" {
+		if token := os.Getenv("EDGE_ADMIN_TOKEN"); token != "" {
+			auth := r.Header.Get("Authorization")
+			if auth != "Bearer "+token && r.Header.Get("X-Admin-Token") != token {
+				reply(401, map[string]string{"error": "unauthorized"})
+				return
+			}
+		}
 	}
 	switch {
 	case path == "/healthz":
