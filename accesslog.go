@@ -24,11 +24,33 @@ func newAccessLog(out io.Writer, enabled bool) *AccessLog {
 	return &AccessLog{out: out, enabled: enabled}
 }
 
-func dash(s string) string {
+func sanitizeLog(s string) string {
 	if s == "" {
 		return "-"
 	}
-	return s
+	var sb strings.Builder
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b < 32 || b == 127 || b == '"' {
+			sb.WriteByte('_')
+		} else {
+			sb.WriteByte(b)
+		}
+	}
+	return sb.String()
+}
+
+func sanitizeField(s string) string {
+	var sb strings.Builder
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b < 32 || b == 127 {
+			sb.WriteByte('_')
+		} else {
+			sb.WriteByte(b)
+		}
+	}
+	return sb.String()
 }
 
 func (l *AccessLog) add(c *Ctx, status int) {
@@ -53,14 +75,14 @@ func (l *AccessLog) add(c *Ctx, status int) {
 		l.stamp = now.UTC().Format("2006-01-02T15:04:05.000Z")
 	}
 	b := &l.buf
-	b.WriteString(ip)
+	b.WriteString(sanitizeField(ip))
 	b.WriteString(" - - [")
 	b.WriteString(l.stamp)
 	b.WriteString("] \"")
-	b.WriteString(c.method)
+	b.WriteString(sanitizeField(c.method))
 	b.WriteByte(' ')
-	b.WriteString(c.path)
-	b.WriteString(c.search)
+	b.WriteString(sanitizeField(c.path))
+	b.WriteString(sanitizeField(c.search))
 	if r.http11 {
 		b.WriteString(" HTTP/1.1\" ")
 	} else {
@@ -70,11 +92,11 @@ func (l *AccessLog) add(c *Ctx, status int) {
 	b.WriteByte(' ')
 	b.WriteString(strconv.FormatInt(c.bytes, 10))
 	b.WriteString(" \"")
-	b.WriteString(dash(r.h[hReferer]))
+	b.WriteString(sanitizeLog(r.h[hReferer]))
 	b.WriteString("\" \"")
-	b.WriteString(dash(r.h[hUserAgent]))
+	b.WriteString(sanitizeLog(r.h[hUserAgent]))
 	b.WriteString("\" \"")
-	b.WriteString(dash(r.Host))
+	b.WriteString(sanitizeLog(r.Host))
 	b.WriteString("\" cache:")
 	b.WriteString(c.cache)
 	b.WriteString(" rt:")
