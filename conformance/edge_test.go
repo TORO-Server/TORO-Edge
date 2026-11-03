@@ -520,37 +520,39 @@ func TestStreamClientDisconnect(t *testing.T) {
 }
 
 func TestWebSocket(t *testing.T) {
-	// /up/ws だけ、つないだあとはそのまま渡す
+	// map.torosaba.net (Dynmap) と 3d-map.torosaba.net (BlueMap) の /up/ws だけ、つないだあとはそのまま渡す
 	withEnv(t, none(), func(e *env) {
 		e.mapweb.setHandler(e.mapweb.echoUpgrade)
-		conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(e.edge.port))
-		if err != nil {
-			t.Fatal(err)
+		for i, host := range []string{"map.torosaba.net", "3d-map.torosaba.net"} {
+			conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(e.edge.port))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			conn.SetDeadline(time.Now().Add(10 * time.Second))
+			fmt.Fprintf(conn, "GET /up/ws HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: https://%s\r\n\r\n", host, host)
+			br := bufio.NewReader(conn)
+			res, err := http.ReadResponse(br, &http.Request{Method: "GET"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			eq(t, res.StatusCode, 101, host)
+			msg := "hello through the proxy"
+			conn.Write([]byte(msg))
+			echoed := make([]byte, len(msg))
+			if _, err := io.ReadFull(br, echoed); err != nil {
+				t.Fatal(err)
+			}
+			eq(t, string(echoed), msg, host)
+			conn.Close()
+			seen := e.mapweb.seenAt(i)
+			eq(t, seen.URL, "/up/ws", host)
+			eq(t, seen.Header.Get("Sec-WebSocket-Key"), "dGhlIHNhbXBsZSBub25jZQ==", host)
+			eq(t, seen.Header.Get("Host"), host)
 		}
-		defer conn.Close()
-		conn.SetDeadline(time.Now().Add(10 * time.Second))
-		fmt.Fprintf(conn, "GET /up/ws HTTP/1.1\r\nHost: map.torosaba.net\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: https://map.torosaba.net\r\n\r\n")
-		br := bufio.NewReader(conn)
-		res, err := http.ReadResponse(br, &http.Request{Method: "GET"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		eq(t, res.StatusCode, 101)
-		msg := "hello through the proxy"
-		conn.Write([]byte(msg))
-		echoed := make([]byte, len(msg))
-		if _, err := io.ReadFull(br, echoed); err != nil {
-			t.Fatal(err)
-		}
-		eq(t, string(echoed), msg)
-		conn.Close()
-		seen := e.mapweb.seenAt(0)
-		eq(t, seen.URL, "/up/ws")
-		eq(t, seen.Header.Get("Sec-WebSocket-Key"), "dGhlIHNhbXBsZSBub25jZQ==")
-		eq(t, seen.Header.Get("Host"), "map.torosaba.net")
 
-		// /up/ws 以外や、ほかのサイトへの Upgrade は断る
-		for _, c := range [][2]string{{"/up/other", "map.torosaba.net"}, {"/up/ws", "3d-map.torosaba.net"}, {"/live/plugin", "map.torosaba.net"}} {
+		// /up/ws 以外や、assets への Upgrade は断る
+		for _, c := range [][2]string{{"/up/other", "map.torosaba.net"}, {"/up/other", "3d-map.torosaba.net"}, {"/up/ws", "assets.torosaba.net"}, {"/live/plugin", "map.torosaba.net"}, {"/live/plugin", "3d-map.torosaba.net"}} {
 			r, err := request(e.edge.port, c[0], reqOpts{host: c[1], headers: hdr("connection", "Upgrade", "upgrade", "websocket")})
 			if err != nil {
 				t.Fatalf("%s%s: %v", c[1], c[0], err)
