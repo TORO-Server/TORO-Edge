@@ -101,8 +101,8 @@ func (e *Edge) handle(c *Ctx) {
 	}
 	site := e.siteFor(req)
 	if req.upgrade {
-		// WebSocket (/up/ws だけ): つないだあとは何も解かずにそのまま渡す
-		if e.srv.closing.Load() || site.name != "map" || c.path != "/up/ws" {
+		// WebSocket (map.torosaba.net と 3d-map.torosaba.net の /up/ws だけ): つないだあとは何も解かずにそのまま渡す
+		if e.srv.closing.Load() || (site.name != "map" && site.name != "bluemap") || c.path != "/up/ws" {
 			notFound(c)
 			return
 		}
