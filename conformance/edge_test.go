@@ -124,8 +124,8 @@ func TestStaticDynmap(t *testing.T) {
 		eq(t, png.h("Content-Type"), "image/png")
 		ok(t, !png.has("Content-Encoding"))
 		eq(t, e.get("/images/nothing.png").status, 404)
-		// Host が知らない名前でも map.torosaba.net と同じ (内側から toro-nginx で呼ばれる)
-		eq(t, e.get("/css/style.css", reqOpts{host: "toro-nginx"}).status, 200)
+		// Host が知らない名前でも map.torosaba.net と同じ (内側から toro-edge で呼ばれる)
+		eq(t, e.get("/css/style.css", reqOpts{host: "toro-edge"}).status, 200)
 		eq(t, e.mapweb.seenLen(), 0)
 	})
 }
