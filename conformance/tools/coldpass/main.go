@@ -2,7 +2,7 @@
 //
 // 使い方: coldpass --target toro-edge:80 --scenarios scenarios.json --only mix [--concurrency 8]
 //
-// 先に、キャッシュを空にしておく (edge は POST /purge、nginx は空のキャッシュで起動し直す)
+// 先に、キャッシュを空にしておく (POST /purge)
 package main
 
 import (

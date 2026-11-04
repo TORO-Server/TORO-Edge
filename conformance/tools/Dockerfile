@@ -1,4 +1,4 @@
-# 負荷と突き合わせの道具 (bench / parity / coldpass) を、1 つのイメージにする。リポジトリの直下から:
+# 負荷の道具 (bench / coldpass) を、1 つのイメージにする。リポジトリの直下から:
 #
 #   docker build -f conformance/tools/Dockerfile -t toro-edge:tools .
 #
@@ -11,7 +11,7 @@ RUN go mod download
 COPY . .
 ARG TARGETOS
 ARG TARGETARCH
-RUN for t in bench parity coldpass; do \
+RUN for t in bench coldpass; do \
       CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/$t ./conformance/tools/$t || exit 1; \
     done
 
