@@ -410,7 +410,7 @@ type env struct {
 }
 
 const (
-	settingsJSON = `{"version":"5.x","scripts":["a.js"],"maps":["overworld"]}`
+	settingsJSON = `{"version":"5.x","scripts":["a.js"],"maps":["overworld","other"]}`
 	indexHTML    = "<html><head>\n\t<script type=\"text/javascript\" src=\"standalone/config.js\"></script>\n</head></html>\n"
 )
 

@@ -8,29 +8,38 @@ import (
 	"time"
 )
 
-// Upstream は元のサーバー 1 つへの接続 (つなぎっぱなし)。同じ相手に何度もつなぎ直さない
+// Upstream は元のサーバー 1 つへの接続 (つなぎっぱなし)。同じ相手に何度もつなぎ直さない。
+// 長く続くもの (SSE、動画、遅い客への中継) で、ためるための短い取得を待たせないよう、接続の口を分ける
 type Upstream struct {
-	name      string
-	endpoint  Endpoint
+	name     string
+	endpoint Endpoint
+	// ためるために聞く口
 	transport *http.Transport
+	// そのまま流す口 (relayRequest)
+	streams *http.Transport
 }
 
 func newUpstream(name string, ep Endpoint, maxConns int, dialTimeout time.Duration) *Upstream {
 	return &Upstream{
-		name:     name,
-		endpoint: ep,
-		transport: &http.Transport{
-			DialContext:         (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext,
-			MaxIdleConns:        maxConns,
-			MaxIdleConnsPerHost: maxConns / 2,
-			MaxConnsPerHost:     maxConns,
-			IdleConnTimeout:     90 * time.Second,
-			// 圧縮は元に頼まず、ここで 1 度だけ行う (Accept-Encoding: identity を自分で付ける)
-			DisableCompression: true,
-			ForceAttemptHTTP2:  false,
-			WriteBufferSize:    32 << 10,
-			ReadBufferSize:     32 << 10,
-		},
+		name:      name,
+		endpoint:  ep,
+		transport: newTransport(maxConns, dialTimeout),
+		streams:   newTransport(maxConns, dialTimeout),
+	}
+}
+
+func newTransport(maxConns int, dialTimeout time.Duration) *http.Transport {
+	return &http.Transport{
+		DialContext:         (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext,
+		MaxIdleConns:        maxConns,
+		MaxIdleConnsPerHost: maxConns / 2,
+		MaxConnsPerHost:     maxConns,
+		IdleConnTimeout:     90 * time.Second,
+		// 圧縮は元に頼まず、ここで 1 度だけ行う (Accept-Encoding: identity を自分で付ける)
+		DisableCompression: true,
+		ForceAttemptHTTP2:  false,
+		WriteBufferSize:    32 << 10,
+		ReadBufferSize:     32 << 10,
 	}
 }
 
@@ -41,6 +50,8 @@ type UpstreamRequest struct {
 	query         string // ? を除く
 	headers       map[string]string
 	headerTimeout time.Duration
+	// そのまま流す口を使う
+	stream bool
 }
 
 // do は頭書きが届いたら返す。呼んだ側は、本文を読み終えるか Close し、cancel を呼ぶ。
@@ -71,7 +82,11 @@ func (u *Upstream) do(ctx context.Context, q UpstreamRequest) (*http.Response, c
 	}
 	// 頭書きが届くまでの時間 (届いたら止める。本文を待つ時間は別に見る)
 	timer := time.AfterFunc(q.headerTimeout, cancel)
-	resp, err := u.transport.RoundTrip(req)
+	transport := u.transport
+	if q.stream {
+		transport = u.streams
+	}
+	resp, err := transport.RoundTrip(req)
 	timer.Stop()
 	if err != nil {
 		cancel()
@@ -81,7 +96,10 @@ func (u *Upstream) do(ctx context.Context, q UpstreamRequest) (*http.Response, c
 	return resp, cancel, nil
 }
 
-func (u *Upstream) close() { u.transport.CloseIdleConnections() }
+func (u *Upstream) close() {
+	u.transport.CloseIdleConnections()
+	u.streams.CloseIdleConnections()
+}
 
 // baseUpstreamHeaders は元に渡す頭書き。客の頭書きは、ここに書いたものだけを渡す
 // (X-Toro-Client-IP のような内側の頭書きを、客に書かせない)。

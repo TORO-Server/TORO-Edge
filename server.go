@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -23,6 +26,7 @@ type Edge struct {
 	out       io.Writer
 	srv       *Server
 	admin     *http.Server
+	stop      chan struct{}
 	Port      int
 	AdminPort int
 }
@@ -37,6 +41,7 @@ func startEdge(cfg Config, out io.Writer) (*Edge, error) {
 		live:   newUpstream("bluemap-live", cfg.BlueMapLive, 32, 2*time.Second),
 		out:    out,
 		log:    newAccessLog(out, cfg.AccessLog),
+		stop:   make(chan struct{}),
 	}
 	dyn := newStaticSite(cfg.DynmapWeb)
 	blue := newStaticSite(cfg.BlueMapWeb, "maps")
@@ -67,14 +72,15 @@ func startEdge(cfg Config, out io.Writer) (*Edge, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", e.serveAdmin)
 	if os.Getenv("EDGE_PPROF") == "1" {
-		mux.HandleFunc("/debug/pprof/", pprof.Index)
-		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		mux.HandleFunc("/debug/pprof/", adminOnly(pprof.Index))
+		mux.HandleFunc("/debug/pprof/profile", adminOnly(pprof.Profile))
+		mux.HandleFunc("/debug/pprof/symbol", adminOnly(pprof.Symbol))
+		mux.HandleFunc("/debug/pprof/trace", adminOnly(pprof.Trace))
 	}
 	e.admin = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go e.srv.Serve(ln)
 	go e.admin.Serve(aln)
+	go e.cache.sweepLoop(e.stop)
 	return e, nil
 }
 
@@ -100,6 +106,16 @@ func (e *Edge) handle(c *Ctx) {
 		return
 	}
 	site := e.siteFor(req)
+	defer func() {
+		if rec := recover(); rec != nil {
+			fmt.Fprintf(e.out, "error %s %s: %v\n", c.method, c.path, rec)
+			if c.status == 0 {
+				sendText(c, http.StatusInternalServerError, "Internal Server Error\n")
+			} else {
+				cn.closeAfter = true
+			}
+		}
+	}()
 	if req.upgrade {
 		// WebSocket (map.torosaba.net と 3d-map.torosaba.net の /up/ws だけ): つないだあとは何も解かずにそのまま渡す
 		if e.srv.closing.Load() || (site.name != "map" && site.name != "bluemap") || c.path != "/up/ws" {
@@ -118,16 +134,6 @@ func (e *Edge) handle(c *Ctx) {
 		notFound(c)
 		return
 	}
-	defer func() {
-		if rec := recover(); rec != nil {
-			fmt.Fprintf(e.out, "error %s %s: %v\n", c.method, c.path, rec)
-			if c.status == 0 {
-				sendText(c, http.StatusInternalServerError, "Internal Server Error\n")
-			} else {
-				cn.closeAfter = true
-			}
-		}
-	}()
 	h(c)
 }
 
@@ -150,7 +156,33 @@ func rssBytes() uint64 {
 	return resident * uint64(os.Getpagesize())
 }
 
-// serveAdmin は管理用 (Docker の中だけ): 生きているか、数、キャッシュを空にする
+// adminAllowed は管理用の合言葉 (EDGE_ADMIN_TOKEN。空なら確かめない) を、長さも時間で漏らさないよう SHA-256 にしてから比べる
+func adminAllowed(r *http.Request) bool {
+	token := os.Getenv("EDGE_ADMIN_TOKEN")
+	if token == "" {
+		return true
+	}
+	want := sha256.Sum256([]byte(token))
+	bearer, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	a := sha256.Sum256([]byte(bearer))
+	b := sha256.Sum256([]byte(r.Header.Get("X-Admin-Token")))
+	byBearer := subtle.ConstantTimeCompare(a[:], want[:]) == 1 && strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")
+	byHeader := subtle.ConstantTimeCompare(b[:], want[:]) == 1
+	return byBearer || byHeader
+}
+
+// adminOnly は合言葉を確かめてから渡す (pprof)
+func adminOnly(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !adminAllowed(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		h(w, r)
+	}
+}
+
+// serveAdmin は管理用 (コンテナの中の 127.0.0.1 だけ): 生きているか、数、キャッシュを空にする
 func (e *Edge) serveAdmin(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	closing := e.srv.closing.Load()
@@ -161,14 +193,9 @@ func (e *Edge) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		w.Write(body)
 	}
-	if path != "/healthz" {
-		if token := os.Getenv("EDGE_ADMIN_TOKEN"); token != "" {
-			auth := r.Header.Get("Authorization")
-			if auth != "Bearer "+token && r.Header.Get("X-Admin-Token") != token {
-				reply(401, map[string]string{"error": "unauthorized"})
-				return
-			}
-		}
+	if path != "/healthz" && !adminAllowed(r) {
+		reply(401, map[string]string{"error": "unauthorized"})
+		return
 	}
 	switch {
 	case path == "/healthz":
@@ -188,7 +215,7 @@ func (e *Edge) serveAdmin(w http.ResponseWriter, r *http.Request) {
 			"revalidated": stats.revalidated.Load(), "coalesced": stats.coalesced.Load(), "bypass": stats.bypass.Load(), "errorStale": stats.errorStale.Load(),
 			"upstreamRequests": stats.upstreamRequests.Load(), "upstreamErrors": stats.upstreamErrors.Load(), "fallbacks": stats.fallbacks.Load(),
 			"wsOpen": stats.wsOpen.Load(), "wsTotal": stats.wsTotal.Load(),
-			"cache":  map[string]any{"entries": entries, "bytes": bytes, "limit": e.cfg.CacheBytes, "evictions": evictions},
+			"cache":  map[string]any{"entries": entries, "bytes": bytes, "closingBytes": e.cache.closing.Load(), "limit": e.cfg.CacheBytes, "evictions": evictions},
 			"memory": map[string]any{"rss": rssBytes(), "heapUsed": ms.HeapAlloc, "heapSys": ms.HeapSys, "goroutines": runtime.NumGoroutine()},
 		})
 	case path == "/purge" && r.Method == http.MethodPost:
@@ -204,6 +231,7 @@ func (e *Edge) close(grace time.Duration) {
 	// つながっている WebSocket は待たれないので、猶予のあとで閉じる
 	timer := time.AfterFunc(grace, closeAllSockets)
 	defer timer.Stop()
+	close(e.stop)
 	e.srv.Shutdown(grace)
 	closeAllSockets()
 	e.admin.Close()

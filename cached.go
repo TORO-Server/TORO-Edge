@@ -4,12 +4,17 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 )
+
+var errFetchPanic = errors.New("fetch panicked")
 
 // CachedOptions は toro-map-web などの返事をメモリにためて返す決まり
 type CachedOptions struct {
@@ -41,6 +46,13 @@ type CachedOptions struct {
 	fallback Handler
 	log      bool
 }
+
+const (
+	// これより長い鍵はためない (流す)。URL は 8 KB まで受けるので、長い鍵でメモリを埋めさせない
+	maxKeyBytes = 1024
+	// 404 を、古いものとして返してよい長さの上限 (ms)。でたらめな URL の返事を長く持たない
+	negativeKeep = 60 * sec
+)
 
 type fetched struct {
 	entity *Entity
@@ -144,11 +156,18 @@ func cachedHandler(o CachedOptions) Handler {
 		path, query := upstreamPath(c)
 		base := baseUpstreamHeaders(c.req)
 		go func() {
+			// 裏で panic しても全体を止めない (待っている客には、元に聞けなかったものとして返す)
+			defer func() {
+				if rec := recover(); rec != nil {
+					fmt.Fprintln(os.Stderr, "fetch:", path, rec)
+					f.res, f.err = fetched{}, errFetchPanic
+				}
+				mu.Lock()
+				delete(inflight, key)
+				mu.Unlock()
+				close(f.done)
+			}()
 			f.res, f.err = fetchOnce(path, query, base, key, stale)
-			mu.Lock()
-			delete(inflight, key)
-			mu.Unlock()
-			close(f.done)
 		}()
 		return f, false
 	}
@@ -166,6 +185,12 @@ func cachedHandler(o CachedOptions) Handler {
 	return func(c *Ctx) {
 		c.log = o.log
 		key := keyOf(c)
+		if len(key) > maxKeyBytes {
+			c.cache = "BYPASS"
+			stats.bypass.Add(1)
+			bypass(c, &o, upstreamPath)
+			return
+		}
 		now := nowMs()
 		e := o.cache.get(key, now)
 		if e != nil {
@@ -242,6 +267,12 @@ func cachedHandler(o CachedOptions) Handler {
 
 // bypass は大きすぎてためられないものを、そのまま流す
 func bypass(c *Ctx, o *CachedOptions, upstreamPath func(*Ctx) (string, string)) {
+	ipKey := clientKey(c.req)
+	if !streamLimit.enter(ipKey) {
+		tooManyStreams(c)
+		return
+	}
+	defer streamLimit.leave(ipKey)
 	headers := baseUpstreamHeaders(c.req)
 	for _, id := range []hid{hRange, hIfRange, hIfNoneMatch, hIfModifiedSince} {
 		if v := c.req.h[id]; v != "" {
@@ -303,13 +334,22 @@ func setFreshness(e *Entity, f fresh, now int64, o *CachedOptions) {
 	}
 	fu := now + f.ttl
 	e.freshUntil.Store(fu)
+	swr, errorTtl := o.swr, o.errorTtl
+	if e.status == http.StatusNotFound {
+		if swr > negativeKeep {
+			swr = negativeKeep
+		}
+		if errorTtl > negativeKeep {
+			errorTtl = negativeKeep
+		}
+	}
 	// 毎回確かめさせるもの (ttl 0) は、古いまま返さない
 	su := fu
 	if f.ttl > 0 {
-		su += o.swr
+		su += swr
 	}
 	e.staleUntil.Store(su)
-	e.errorUntil.Store(fu + o.errorTtl)
+	e.errorUntil.Store(fu + errorTtl)
 	e.nextRefresh.Store(0)
 }
 
