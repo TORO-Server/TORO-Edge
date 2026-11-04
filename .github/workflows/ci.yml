@@ -89,7 +89,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       # 来歴の証明は、公開のリポジトリだけ (非公開では GitHub Enterprise が要る)
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         if: github.event_name != 'pull_request' && !github.event.repository.private
         with:
           subject-name: ${{ env.IMAGE }}
