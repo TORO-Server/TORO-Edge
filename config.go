@@ -16,7 +16,7 @@ func (e Endpoint) Addr() string { return e.Host + ":" + strconv.Itoa(e.Port) }
 
 type Config struct {
 	Port int
-	// 管理用 (/healthz, /stats, POST /purge)。Docker の中のネットワークからだけ。Tunnel には出さない
+	// 管理用 (/healthz, /stats, POST /purge)。コンテナの中の 127.0.0.1 からだけ。Tunnel には出さない
 	AdminPort int
 	// toro-map-web (Nuxt)
 	MapWeb Endpoint

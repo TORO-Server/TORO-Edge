@@ -6,7 +6,8 @@
 # ビルドは常にビルドする側の CPU で行い (--platform=$BUILDPLATFORM)、Go の交差コンパイルで amd64 / arm64 を作る
 # (QEMU の中でコンパイルしない。速く、結果も同じ)
 
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS compile
+# Go は修正版に固定する (go.mod の go と toolchain と同じ版。Dependabot がダイジェストごと更新する)
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS compile
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

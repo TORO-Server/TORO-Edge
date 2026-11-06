@@ -260,19 +260,21 @@ func TestCacheStale(t *testing.T) {
 			}
 			sendText(w, 200, hdr("content-type", "application/json", "cache-control", "no-cache", "etag", `"w1"`), `{"timestamp":1}`)
 		})
-		url := "/up/world/main/123.json"
+		url := "/up/world/main/123"
+		// 元には、鍵から作った URL で聞く
+		upstream := "/up/world/main/0"
 		eq(t, e.get(url).h("X-Edge-Cache"), "MISS")
-		eq(t, e.mapweb.hitCount(url), 1)
+		eq(t, e.mapweb.hitCount(upstream), 1)
 		// 別の ts でも、同じワールドは同じもの
-		eq(t, e.get("/up/world/main/999.json").h("X-Edge-Cache"), "HIT")
-		eq(t, e.mapweb.hitCount(url), 1)
+		eq(t, e.get("/up/world/main/999").h("X-Edge-Cache"), "HIT")
+		eq(t, e.mapweb.hitCount(upstream), 1)
 
 		time.Sleep(1100 * time.Millisecond)
 		stale := e.get(url)
 		eq(t, stale.h("X-Edge-Cache"), "STALE")
 		eq(t, string(stale.body), `{"timestamp":1}`)
 		time.Sleep(150 * time.Millisecond)
-		eq(t, e.mapweb.hitCount(url), 2)
+		eq(t, e.mapweb.hitCount(upstream), 2)
 		eq(t, e.mapweb.seenAt(-1).Header.Get("If-None-Match"), `"w1"`)
 		// 304 で新しくなった
 		eq(t, e.get(url).h("X-Edge-Cache"), "HIT")
@@ -285,7 +287,284 @@ func TestCacheStale(t *testing.T) {
 		eq(t, errReply.h("X-Edge-Cache"), "ERROR-STALE")
 		eq(t, string(errReply.body), `{"timestamp":1}`)
 		// 初めて聞くものが落ちている元に当たったら 502
-		eq(t, e.get("/up/world/other/1.json").status, 502)
+		eq(t, e.get("/up/world/other/1").status, 502)
+	})
+}
+
+func TestUpWorldShape(t *testing.T) {
+	// /up/world/<ワールド>/<数字> だけ。元へ渡すのは鍵から作った URL で、先頭の客のパスやクエリは持ち込まない
+	withEnv(t, none(), func(e *env) {
+		e.mapweb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+			sendText(w, 200, hdr("content-type", "application/json"), `{"timestamp":1}`)
+		})
+		for _, bad := range []string{"/up/world/main", "/up/world/main/", "/up/world/main/x", "/up/world/main/1.json", "/up/world/main/1/extra", "/up/world//1"} {
+			eq(t, e.get(bad).status, 404, bad)
+		}
+		eq(t, e.mapweb.seenLen(), 0)
+		eq(t, e.get("/up/world/main/5?x=1&y=2").status, 200)
+		eq(t, e.mapweb.seenAt(0).URL, "/up/world/main/0")
+		// /up/configuration もクエリを渡さない
+		eq(t, e.get("/up/configuration?x=1").status, 200)
+		eq(t, e.mapweb.hitCount("/up/configuration"), 1)
+		// 知らないワールドの 404 も少しのあいだ覚える
+		e.mapweb.setHandler(notFound)
+		eq(t, e.get("/up/world/nothing/1").status, 404)
+		eq(t, e.get("/up/world/nothing/2").status, 404)
+		eq(t, e.mapweb.hitCount("/up/world/nothing/0"), 1)
+	})
+}
+
+func TestQueryIsNotPartOfTheKey(t *testing.T) {
+	// 中身がクエリで変わらないものは、クエリを変えても 1 つのものとしてためる
+	withEnv(t, none(), func(e *env) {
+		e.mapweb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+			sendText(w, 200, hdr("content-type", "application/octet-stream", "cache-control", "public, max-age=300"), "x")
+		})
+		for _, c := range []struct{ host, path string }{
+			{"map.torosaba.net", "/_nuxt/a.js"},
+			{"map.torosaba.net", "/pwa/a.png"},
+			{"map.torosaba.net", "/toro/a.js"},
+			{"map.torosaba.net", "/"},
+			{"3d-map.torosaba.net", "/_nuxt/b.js"},
+			{"3d-map.torosaba.net", "/pwa/b.png"},
+			{"3d-map.torosaba.net", "/mcassets/0123456789abcdef0123/textures.bin"},
+			{"3d-map.torosaba.net", "/"},
+		} {
+			before := e.mapweb.hitCount(c.path)
+			for i := 0; i < 3; i++ {
+				eq(t, e.req(e.edge.port, c.host, c.path+"?v="+strconv.Itoa(i), nil).status, 200, c.path)
+			}
+			eq(t, e.mapweb.hitCount(c.path)-before, 1, c.host+c.path)
+		}
+		entries, _ := e.cacheStats()
+		eq(t, entries, 8)
+
+		// /tiles/ は timestamp だけを見る (描き直したタイルは別のもの)
+		tile := "/tiles/main/flat/0_0/a.png"
+		e.get(tile + "?x=1")
+		e.get(tile + "?x=2")
+		eq(t, e.mapweb.hitCount(tile), 1)
+		e.get(tile + "?timestamp=5&x=1")
+		e.get(tile + "?x=2&timestamp=5")
+		eq(t, e.mapweb.hitCount(tile+"?timestamp=5"), 1)
+		e.get(tile + "?timestamp=6")
+		eq(t, e.mapweb.hitCount(tile+"?timestamp=6"), 1)
+
+		// /mcassets/skin は name と uuid だけを見る
+		e.blue("/mcassets/skin?name=Steve&x=1")
+		e.blue("/mcassets/skin?x=2&name=Steve")
+		eq(t, e.mapweb.hitCount("/mcassets/skin?name=Steve"), 1)
+		e.blue("/mcassets/skin?name=Alex")
+		eq(t, e.mapweb.hitCount("/mcassets/skin?name=Alex"), 1)
+	})
+}
+
+func TestLongKeyIsNotStored(t *testing.T) {
+	// 長い鍵はためずに流す
+	withEnv(t, none(), func(e *env) {
+		e.mapweb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+			sendText(w, 200, hdr("content-type", "image/png", "cache-control", "public, max-age=300"), "x")
+		})
+		url := "/tiles/" + strings.Repeat("a", 2000) + ".png"
+		for i := 0; i < 2; i++ {
+			r := e.get(url)
+			eq(t, r.status, 200)
+			eq(t, r.h("X-Edge-Cache"), "BYPASS")
+		}
+		eq(t, e.mapweb.hitCount(url), 2)
+		entries, _ := e.cacheStats()
+		eq(t, entries, 0)
+	})
+}
+
+func TestEncodedDelimitersAreRefused(t *testing.T) {
+	// エンコードしたドット・スラッシュ・バックスラッシュのあるパスは、どの経路でも元に渡さない
+	withEnv(t, none(), func(e *env) {
+		for _, path := range []string{"/maps/overworld/live/%2e%2e/x", "/maps/overworld/live/a%2Fb", "/maps/a%5cb/live/players.json", "/tiles/a%2e%2e/b.png", "/_nuxt/a%2fb.js", "/_marumasign/a%2eb", "/mcassets/a%2fb"} {
+			eq(t, e.blue(path).status, 404, path)
+			eq(t, e.get(path).status, 404, path)
+		}
+		eq(t, e.mapweb.seenLen(), 0)
+		eq(t, e.live.seenLen(), 0)
+	})
+}
+
+func TestBlueMapLiveNames(t *testing.T) {
+	// live/ は実際に使う名前と settings.json にある地図だけ。ほかは toro-main に聞かない
+	withEnv(t, none(), func(e *env) {
+		e.live.setHandler(func(w http.ResponseWriter, _ *http.Request) {
+			sendText(w, 200, hdr("content-type", "application/json"), `{"players":[]}`)
+		})
+		for _, path := range []string{"/maps/overworld/live/", "/maps/overworld/live/secret.txt", "/maps/overworld/live/players.json/x", "/maps/nothing/live/players.json", "/maps/nothing/live/sse", "/maps/nothing/live/markers.json"} {
+			eq(t, e.blue(path).status, 404, path)
+		}
+		eq(t, e.live.seenLen(), 0)
+		eq(t, e.mapweb.seenLen(), 0)
+		eq(t, e.blue("/maps/overworld/live/players.json").status, 200)
+		eq(t, e.live.seenLen(), 1)
+		// settings.json が読めるあいだは、書き換えたら新しい地図も通る
+		put(t, e.blueDir, "settings.json", []byte(`{"maps":["overworld","nothing"]}`))
+		time.Sleep(1200 * time.Millisecond)
+		e.blue("/maps/overworld/live/players.json")
+		time.Sleep(100 * time.Millisecond)
+		eq(t, e.blue("/maps/nothing/live/players.json").status, 200)
+		// 読めないときは止めない
+		if err := os.Remove(filepath.Join(e.blueDir, "settings.json")); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(1200 * time.Millisecond)
+		e.blue("/maps/overworld/live/players.json")
+		time.Sleep(100 * time.Millisecond)
+		eq(t, e.blue("/maps/third/live/players.json").status, 200)
+	})
+}
+
+// endlessBody は終わらない返事を流す元
+func endlessBody(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "video/mp4")
+	w.WriteHeader(200)
+	fl := w.(http.Flusher)
+	for {
+		if _, err := w.Write(bytes.Repeat([]byte{1}, 1024)); err != nil {
+			return
+		}
+		fl.Flush()
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// hold は返事の頭書きが届くまで待って、つなぎを開いたまま返す
+func hold(t *testing.T, e *env, path, host, ip string) (net.Conn, int) {
+	t.Helper()
+	conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(e.edge.port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	_, raw := buildRequest(path, reqOpts{host: host, headers: hdr("cf-connecting-ip", ip, "origin", "https://"+host)}, true)
+	conn.Write(raw)
+	res, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "GET"})
+	if err != nil {
+		t.Fatalf("%s from %s: %v", path, ip, err)
+	}
+	conn.SetDeadline(time.Time{})
+	return conn, res.StatusCode
+}
+
+func TestStreamLimitPerClient(t *testing.T) {
+	// 1 つの客 (IPv6 は /64 ごと) が同時に流せる数には上限がある。ほかの客と、ためる経路には響かない
+	withEnv(t, none(), func(e *env) {
+		e.mapweb.setHandler(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.RequestURI, "/_marumasign/") {
+				endlessBody(w, r)
+				return
+			}
+			sendText(w, 200, hdr("content-type", "image/png", "cache-control", "public, max-age=300"), "x")
+		})
+		const path, host = "/_marumasign/proxy?u=https%3A%2F%2Fexample.com%2Fa.mp4", "3d-map.torosaba.net"
+		var first net.Conn
+		for i := 0; i < 64; i++ {
+			// 下の 64 ビットが違っても同じ客
+			conn, status := hold(t, e, path, host, "2001:db8:1:2::"+strconv.FormatInt(int64(i+1), 16))
+			eq(t, status, 200, i)
+			if i == 0 {
+				first = conn
+			}
+		}
+		_, status := hold(t, e, path, host, "2001:db8:1:2:ffff::1")
+		eq(t, status, 429)
+		_, status = hold(t, e, path, host, "2001:db8:1:3::1")
+		eq(t, status, 200, "another /64")
+		eq(t, e.get("/tiles/main/flat/0_0/a.png").status, 200)
+		// 切れたら空く
+		first.Close()
+		for i := 0; ; i++ {
+			_, status = hold(t, e, path, host, "2001:db8:1:2:ffff::1")
+			if status == 200 || i > 100 {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		eq(t, status, 200, "after a stream ended")
+		// Cloudflare を通っていないもの (Docker の中) は数えない
+		conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(e.edge.port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_, raw := buildRequest(path, reqOpts{host: host, headers: hdr("origin", "https://"+host)}, true)
+		conn.Write(raw)
+		res, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "GET"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		eq(t, res.StatusCode, 200)
+	})
+}
+
+func TestSSEDoesNotBlockCachedFetches(t *testing.T) {
+	// SSE は客ごとに少しだけ。流しているものが接続の上限まで埋まっても、ためる経路 (live/players.json) は待たされない
+	withEnv(t, none(), func(e *env) {
+		var closed atomic.Bool
+		sse := sseUpstream(&closed)
+		e.live.setHandler(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.RequestURI, "/sse") {
+				sse(w, r)
+				return
+			}
+			sendText(w, 200, hdr("content-type", "application/json"), `{"players":[]}`)
+		})
+		const path, host = "/maps/overworld/live/sse", "3d-map.torosaba.net"
+		for i := 0; i < 8; i++ {
+			_, status := hold(t, e, path, host, "203.0.113.1")
+			eq(t, status, 200, i)
+		}
+		_, status := hold(t, e, path, host, "203.0.113.1")
+		eq(t, status, 429)
+		// 元への接続の上限 (32) まで埋める
+		for i := 2; i <= 4; i++ {
+			for j := 0; j < 8; j++ {
+				_, status := hold(t, e, path, host, "203.0.113."+strconv.Itoa(i))
+				eq(t, status, 200, i)
+			}
+		}
+		t0 := time.Now()
+		r := e.blue("/maps/overworld/live/players.json")
+		eq(t, r.status, 200)
+		eq(t, string(r.body), `{"players":[]}`)
+		ok(t, time.Since(t0) < 2*time.Second, "cached fetch waited ", time.Since(t0))
+	})
+}
+
+func TestWebSocketLimitPerClient(t *testing.T) {
+	// 1 つの客がつなげる WebSocket の数には上限がある
+	withEnv(t, none(), func(e *env) {
+		e.mapweb.setHandler(e.mapweb.echoUpgrade)
+		open := func(ip string) int {
+			conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(e.edge.port))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { conn.Close() })
+			conn.SetDeadline(time.Now().Add(10 * time.Second))
+			fmt.Fprintf(conn, "GET /up/ws HTTP/1.1\r\nHost: map.torosaba.net\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nCf-Connecting-Ip: %s\r\n\r\n", ip)
+			res, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "GET"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return res.StatusCode
+		}
+		for i := 0; i < 16; i++ {
+			eq(t, open("203.0.113.1"), 101, i)
+		}
+		eq(t, open("203.0.113.1"), 429)
+		eq(t, open("203.0.113.2"), 101, "another client")
 	})
 }
 
@@ -412,7 +691,7 @@ func TestBlueMapLive(t *testing.T) {
 			sendText(w, 200, hdr("content-type", "application/json", "cache-control", "public, max-age=3600", "access-control-allow-origin", "*"), `{"players":["last-from-db"]}`)
 		})
 		// まだためていない (古いものもない) ものは、map-web が DB から返す。ためてあるものは errorTtl のあいだ古い版を返す
-		fallback := e.blue("/maps/overworld/live/other.json?x=1")
+		fallback := e.blue("/maps/other/live/players.json?x=1")
 		eq(t, fallback.status, 200)
 		eq(t, fallback.h("X-Edge-Cache"), "MISS")
 		eq(t, string(fallback.body), `{"players":["last-from-db"]}`)

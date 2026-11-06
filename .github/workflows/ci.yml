@@ -17,6 +17,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -32,6 +33,9 @@ jobs:
       # データ競合の検出つき (並行処理が多いので)。ルートのパッケージだけ (conformance は下で、ビルドした実行ファイルに対して流す)
       - run: go test -race -count=1 .
 
+      # 既知の脆弱性 (Go の脆弱性データベース)。実際に呼んでいる関数に届くものだけを報告する
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
       - run: go build -trimpath -o toro-edge .
 
       # 実行ファイルを外から確かめる試験 (偽の元のサーバーと一時フォルダ)
@@ -44,6 +48,7 @@ jobs:
   image:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write

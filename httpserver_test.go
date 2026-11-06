@@ -37,6 +37,13 @@ func testHandler(c *Ctx) {
 			s.write([]byte(part))
 		}
 		s.finish()
+	case "/fixed":
+		s, err := c.beginStream(200, []byte("Content-Type: text/plain\r\n"), 5)
+		if err != nil {
+			return
+		}
+		s.write([]byte("hello"))
+		s.finish()
 	case "/body":
 		sendText(c, 200, strconv.FormatBool(c.req.hasBody)+"\n")
 	case "/host":
@@ -46,13 +53,19 @@ func testHandler(c *Ctx) {
 	}
 }
 
-func startTestServer(t *testing.T) (string, *Server) {
+func listen(t *testing.T) net.Listener {
 	t.Helper()
-	srv := newServer(testHandler, func(c *Ctx) {})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	return ln
+}
+
+func startTestServer(t *testing.T) (string, *Server) {
+	t.Helper()
+	srv := newServer(testHandler, func(c *Ctx) {})
+	ln := listen(t)
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Shutdown(200 * time.Millisecond) })
 	return ln.Addr().String(), srv
@@ -173,7 +186,8 @@ func TestHeadersAreReadCaseInsensitivelyAndJoined(t *testing.T) {
 
 func TestRequestBodyIsFlagged(t *testing.T) {
 	addr, _ := startTestServer(t)
-	for _, extra := range []string{"Content-Length: 5\r\n", "Transfer-Encoding: chunked\r\n"} {
+	// Transfer-Encoding は値が空でも、本文があるものとして断る
+	for _, extra := range []string{"Content-Length: 5\r\n", "Transfer-Encoding: chunked\r\n", "Transfer-Encoding:\r\n"} {
 		c, br := dial(t, addr)
 		io.WriteString(c, "GET /body HTTP/1.1\r\nHost: a\r\n"+extra+"\r\n")
 		_, body := readResp(t, br, "GET")
@@ -210,6 +224,17 @@ func TestMalformedRequestsAreRejected(t *testing.T) {
 		{"unknown version", "GET /x HTTP/2.0\r\nHost: a\r\n\r\n", 400},
 		{"no version", "GET /x\r\nHost: a\r\n\r\n", 400},
 		{"NUL in value", "GET /x HTTP/1.1\r\nHost: a\r\nX: a\x00b\r\n\r\n", 400},
+		{"control char in value", "GET /x HTTP/1.1\r\nHost: a\r\nX: a\x01b\r\n\r\n", 400},
+		{"DEL in value", "GET /x HTTP/1.1\r\nHost: a\r\nX: a\x7fb\r\n\r\n", 400},
+		{"CR in value", "GET /x HTTP/1.1\r\nHost: a\r\nX: a\rb\r\n\r\n", 400},
+		{"control char in known value", "GET /x HTTP/1.1\r\nHost: a\x01\r\n\r\n", 400},
+		{"separator in header name", "GET /x HTTP/1.1\r\nHost: a\r\nBad(Name: 1\r\n\r\n", 400},
+		{"control char in header name", "GET /x HTTP/1.1\r\nHost: a\r\nBa\x01d: 1\r\n\r\n", 400},
+		{"long bad header name", "GET /x HTTP/1.1\r\nHost: a\r\n" + strings.Repeat("n", 50) + "(: 1\r\n\r\n", 400},
+		{"separator in method", "G(T /x HTTP/1.1\r\nHost: a\r\n\r\n", 400},
+		{"duplicate host after an empty one", "GET /x HTTP/1.1\r\nHost:\r\nHost: b\r\n\r\n", 400},
+		{"duplicate content-length after an empty one", "GET /x HTTP/1.1\r\nHost: a\r\nContent-Length:\r\nContent-Length: 1\r\n\r\n", 400},
+		{"empty content-length", "GET /x HTTP/1.1\r\nHost: a\r\nContent-Length:\r\n\r\n", 400},
 		{"too large headers", "GET /x HTTP/1.1\r\nHost: a\r\nX: " + long + "\r\n\r\n", 431},
 		{"too long request line", "GET /" + long + " HTTP/1.1\r\nHost: a\r\n\r\n", 414},
 	}
@@ -224,6 +249,122 @@ func TestMalformedRequestsAreRejected(t *testing.T) {
 		if resp.StatusCode != tc.want || !resp.Close || !closed(c, br) {
 			t.Errorf("%s: status %d (want %d), close=%v", tc.name, resp.StatusCode, tc.want, resp.Close)
 		}
+	}
+}
+
+// 厳しくしても、普通の頭書きは通す (タブ、obs-text、token の記号、知らない長い名前、値が空のもの)
+func TestUnusualButValidRequestsAreAccepted(t *testing.T) {
+	addr, _ := startTestServer(t)
+	for _, req := range []string{
+		"GET /x HTTP/1.1\r\nHost: a\r\nX: a\tb\r\n\r\n",
+		"GET /x HTTP/1.1\r\nHost: a\r\nX: caf\xc3\xa9\r\n\r\n",
+		"GET /x HTTP/1.1\r\nHost: a\r\nX-!#$%&'*+-.^_`|~: 1\r\n\r\n",
+		"GET /x HTTP/1.1\r\nHost: a\r\n" + strings.Repeat("n", 50) + ": 1\r\n\r\n",
+		"GET /x HTTP/1.1\r\nHost: a\r\nAccept:\r\nAccept: text/plain\r\n\r\n",
+		"OPTIONS /x HTTP/1.1\r\nHost: a\r\n\r\n",
+	} {
+		c, br := dial(t, addr)
+		io.WriteString(c, req)
+		if resp, body := readResp(t, br, "GET"); resp.StatusCode != 200 || string(body) != "ok\n" {
+			t.Errorf("%q: %d %q", req, resp.StatusCode, body)
+		}
+	}
+}
+
+// 流したあとに残った書き込みの期限で、同じつなぎの次の返事が失敗しない
+func TestStaleWriteDeadlineDoesNotBreakTheNextResponse(t *testing.T) {
+	srv := newServer(testHandler, func(c *Ctx) {})
+	srv.writeTimeout = 150 * time.Millisecond
+	ln := listen(t)
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Shutdown(200 * time.Millisecond) })
+	c, br := dial(t, ln.Addr().String())
+	for _, path := range []string{"/fixed", "/stream", "/x"} {
+		io.WriteString(c, "GET "+path+" HTTP/1.1\r\nHost: a\r\n\r\n")
+		if resp, _ := readResp(t, br, "GET"); resp.StatusCode != 200 {
+			t.Fatalf("%s: %d", path, resp.StatusCode)
+		}
+		// 期限を過ぎてから、同じつなぎで次を頼む
+		time.Sleep(300 * time.Millisecond)
+		io.WriteString(c, "GET /x HTTP/1.1\r\nHost: a\r\n\r\n")
+		if resp, body := readResp(t, br, "GET"); resp.StatusCode != 200 || string(body) != "ok\n" {
+			t.Fatalf("after %s: %d %q", path, resp.StatusCode, body)
+		}
+	}
+}
+
+// 読まない客への小さな返事でも、書き込みに期限があるので、つなぎを手放す
+func TestSmallResponseToANonReadingClientTimesOut(t *testing.T) {
+	srv := newServer(testHandler, func(c *Ctx) {})
+	srv.writeTimeout = 100 * time.Millisecond
+	client, server := net.Pipe()
+	defer client.Close()
+	done := make(chan struct{})
+	go func() {
+		srv.serveConn(server)
+		close(done)
+	}()
+	if _, err := io.WriteString(client, "GET /x HTTP/1.1\r\nHost: a\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("connection is stuck writing to a client that does not read")
+	}
+}
+
+// リクエストの読み取りは毎回通るので、手間を見ておく (Cloudflare が付けるものに近い頭書き)
+func BenchmarkReadRequest(b *testing.B) {
+	raw := []byte("GET /maps/overworld/tiles/0/x-3/5/5/z-3/9/0.prbm HTTP/1.1\r\nHost: 3d-map.torosaba.net\r\n" +
+		"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36\r\n" +
+		"Accept: */*\r\nAccept-Encoding: gzip, br\r\nAccept-Language: ja,en-US;q=0.9,en;q=0.8\r\nCdn-Loop: cloudflare; loops=1\r\n" +
+		"Cf-Connecting-Ip: 203.0.113.9\r\nCf-Ipcountry: JP\r\nCf-Ray: 8f0c1f2a3b4c5d6e-NRT\r\nCf-Visitor: {\"scheme\":\"https\"}\r\n" +
+		"Referer: https://3d-map.torosaba.net/\r\nSec-Ch-Ua: \"Chromium\";v=\"130\", \"Not?A_Brand\";v=\"99\"\r\nSec-Ch-Ua-Mobile: ?0\r\n" +
+		"Sec-Ch-Ua-Platform: \"Windows\"\r\nSec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Site: same-origin\r\n" +
+		"X-Forwarded-For: 203.0.113.9\r\nX-Forwarded-Proto: https\r\nConnection: keep-alive\r\n\r\n")
+	r := bytes.NewReader(raw)
+	cn := &conn{br: bufio.NewReaderSize(r, maxHeaderBytes)}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(raw)))
+	for b.Loop() {
+		r.Reset(raw)
+		cn.br.Reset(r)
+		if code, err := cn.readRequest(); err != nil {
+			b.Fatal(code, err)
+		}
+	}
+}
+
+// ためたものを返す経路の手間 (読み取り、返事、1 往復ぶん)
+func BenchmarkCachedHit(b *testing.B) {
+	body := bytes.Repeat([]byte{7}, 8<<10)
+	e := newEntity(entityInit{status: 200, typ: "image/png", body: body, etag: `"x"`, tier: tierFast})
+	srv := newServer(func(c *Ctx) { sendEntity(c, e) }, func(*Ctx) {})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatal(err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(100 * time.Millisecond)
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer c.Close()
+	br := bufio.NewReaderSize(c, 64<<10)
+	req := []byte("GET /tile HTTP/1.1\r\nHost: map.torosaba.net\r\nAccept-Encoding: gzip, br\r\nCf-Connecting-Ip: 203.0.113.9\r\n\r\n")
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := c.Write(req); err != nil {
+			b.Fatal(err)
+		}
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 	}
 }
 

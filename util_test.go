@@ -71,6 +71,9 @@ func TestRouteMatchers(t *testing.T) {
 	deny := map[string]bool{
 		"/x.php": true, "/X.PHP": true, "/a/b.php5": true, "/.env": true, "/a/.git/x": true, "/a/..": true,
 		"/x.php.txt": false, "/phpinfo": false, "/a.php55": false, "/a.ph": false, "/maps/x/tiles/0/x1/z2.prbm": false, "/_nuxt/entry.abc.js": false,
+		// エンコードしたドット・スラッシュ・バックスラッシュ・NUL
+		"/a%2eb": true, "/a%2Eb": true, "/a%2fb": true, "/a%2Fb": true, "/a%5cb": true, "/a%5Cb": true, "/a%00b": true,
+		"/tiles/a%20b.png": false, "/a%": false, "/a%2": false, "/a%41": false,
 	}
 	for p, want := range deny {
 		if got := denyPath(p); got != want {
@@ -81,19 +84,24 @@ func TestRouteMatchers(t *testing.T) {
 		"/maps/overworld/live/markers.json": "markers.json", "/maps/o/live/sse": "sse", "/maps/o/live/players.json": "players.json", "/maps/o/live/": "",
 	}
 	for p, want := range live {
-		if got, ok := mapsLive(p); !ok || got != want {
+		if _, got, ok := mapsLive(p); !ok || got != want {
 			t.Errorf("mapsLive(%q) = %q, %v; want %q", p, got, ok, want)
 		}
 	}
+	if id, _, ok := mapsLive("/maps/overworld/live/sse"); !ok || id != "overworld" {
+		t.Errorf("mapsLive id = %q, %v", id, ok)
+	}
 	for _, p := range []string{"/maps/o/tiles/0/x1/z2.prbm", "/maps//live/x", "/maps/o", "/maps/o/livex/a", "/map/o/live/a", "/maps/live/x"} {
-		if got, ok := mapsLive(p); ok {
+		if _, got, ok := mapsLive(p); ok {
 			t.Errorf("mapsLive(%q) = %q, want no match", p, got)
 		}
 	}
-	if w, ok := upWorld("/up/world/main/123.json"); !ok || w != "main" {
-		t.Errorf("upWorld: %q %v", w, ok)
+	for _, p := range []string{"/up/world/main/123", "/up/world/main/0", "/up/world/main/-3"} {
+		if w, ok := upWorld(p); !ok || w != "main" {
+			t.Errorf("upWorld(%q): %q %v", p, w, ok)
+		}
 	}
-	for _, p := range []string{"/up/world/", "/up/world//1", "/up/world/main", "/up/configuration"} {
+	for _, p := range []string{"/up/world/", "/up/world//1", "/up/world/main", "/up/world/main/", "/up/configuration", "/up/world/main/123.json", "/up/world/main/1/x", "/up/world/main/abc", "/up/world/main/-", "/up/world/main/123456789012345678901"} {
 		if _, ok := upWorld(p); ok {
 			t.Errorf("upWorld(%q) must not match", p)
 		}
@@ -107,6 +115,37 @@ func TestRouteMatchers(t *testing.T) {
 	for _, p := range []string{"/abcdefghijk.png", "/ABCDEFGHIJKL.png", "/abcdefghijkl", "/abcdefghijkl.", "/abcdefghijkl.png/x", "/abcdefghijkl.PNG", "/abcdefghijk1.png", "/abcdefghijkl.abcdefghijk", "/", "/_assets/abcdefghijkl.png"} {
 		if _, ok := assetFile(p); ok {
 			t.Errorf("assetFile(%q) must not match", p)
+		}
+	}
+}
+
+// /tiles/ と /mcassets/skin は、map-web が見るものだけをクエリに残す (ほかを変えても別のものにならない)
+func TestQueryFilters(t *testing.T) {
+	tiles := map[string]string{
+		"":                       "",
+		"?timestamp=123":         "timestamp=123",
+		"?a=1&timestamp=123&b=2": "timestamp=123",
+		"?timestamp=":            "",
+		"?timestamp=x":           "",
+		"?timestamps=1":          "",
+		"?a=1":                   "",
+	}
+	for in, want := range tiles {
+		if got := tileQuery(in); got != want {
+			t.Errorf("tileQuery(%q) = %q, want %q", in, got, want)
+		}
+	}
+	skins := map[string]string{
+		"":                 "",
+		"?name=Steve":      "name=Steve",
+		"?name=Steve&x=1":  "name=Steve",
+		"?x=1&uuid=ab":     "uuid=ab",
+		"?name=a&uuid=b":   "name=a&uuid=b",
+		"?names=a&uuidx=b": "",
+	}
+	for in, want := range skins {
+		if got := skinQuery(in); got != want {
+			t.Errorf("skinQuery(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

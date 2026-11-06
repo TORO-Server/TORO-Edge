@@ -88,11 +88,17 @@ func buildSites(d SiteDeps) *Sites {
 	nsBlueLive := d.cache.space()
 	nsBlueFallback := d.cache.space()
 
-	// proxied は map-web (Nuxt) の返事をためて返す
+	// 鍵と元に聞く URL はパスだけ。クエリを変えて別のものとしてためさせない (BlueMap や古い画面が付けることもある)
+	pathKey := func(c *Ctx) string { return c.path }
+	pathOnly := func(c *Ctx) (string, string) { return c.path, "" }
+
+	// proxied は map-web (Nuxt) の返事をためて返す。クエリを使うものは key と path を決める
 	proxied := func(ns *nsCache, mutate func(o *CachedOptions)) Handler {
 		o := CachedOptions{
 			upstream:       d.mapWeb,
 			cache:          ns,
+			key:            pathKey,
+			path:           pathOnly,
 			errorTtl:       7 * day,
 			tier:           tierFast,
 			maxEntityBytes: cfg.MaxEntityBytes,
@@ -152,16 +158,26 @@ func buildSites(d SiteDeps) *Sites {
 			o.key = func(*Ctx) string { return "config" }
 			o.fixedTtl, o.swr = 5*sec, 5*sec
 		})),
+		// 元に聞く URL も鍵から作る (先頭の客の時刻やクエリを、ワールドで 1 つの返事に持ち込まない)。時刻は見ないので 0
 		fnRule(upWorld, proxied(nsMap, func(o *CachedOptions) {
 			o.key = func(c *Ctx) string { return "update:" + c.cap }
-			o.fixedTtl, o.swr = sec, 2*sec
+			o.path = func(c *Ctx) (string, string) { return "/up/world/" + c.cap + "/0", "" }
+			o.fixedTtl, o.swr, o.negativeTtl = sec, 2*sec, 2*sec
 		})),
 		// 更新とプレイヤーの位置を届ける WebSocket (サーバーが Upgrade を見て渡す。つながらないときは、ブラウザが上の 2 つを取りに来る)
 		exactRule("/up/ws", func(c *Ctx) { sendText(c, http.StatusUpgradeRequired, "Upgrade Required\n", "Upgrade", "websocket") }),
 		// Web チャットやログインは使っていない
 		prefixRule("/up/", notFound),
 		// 地図のタイル、マーカー、プレイヤーの顔。キャッシュの長さは map-web の Cache-Control に従う (なければ 5 分)
+		// 描き直したタイルは ?timestamp= で別の URL になる (クエリはこれだけを見る)
 		prefixRule("/tiles/", proxied(nsMap, func(o *CachedOptions) {
+			o.key = func(c *Ctx) string {
+				if q := tileQuery(c.search); q != "" {
+					return c.path + "?" + q
+				}
+				return c.path
+			}
+			o.path = func(c *Ctx) (string, string) { return c.path, tileQuery(c.search) }
 			o.defaultTtl, o.maxTtl, o.swr, o.negativeTtl, o.log = 5*min, day, 30*sec, 2*sec, false
 		})),
 		// js や css は index.html が ?_=<版> を付けて読む
@@ -171,13 +187,9 @@ func buildSites(d SiteDeps) *Sites {
 	// ───────────── 3d-map.torosaba.net (BlueMap)
 	blueNoCache := newStaticRules(append([][2]string{{"cache-control", "no-cache"}}, blueMapHeaders...)...)
 	blueStatic := newStaticRules(append([][2]string{{"cache-control", "public, max-age=86400, stale-if-error=604800"}, {"cdn-cache-control", "max-age=60"}}, blueMapHeaders...)...)
-	// BlueMap の地図のデータは、? 以降をキーに入れない (BlueMap は付けることがある)
-	blueKey := func(c *Ctx) string { return c.path }
-	bluePath := func(c *Ctx) (string, string) { return c.path, "" }
 
 	// toro-main の再起動中は、BlueMap が DB に書いた最後の版を返す (toro-map-web 経由)。ここは Cloudflare にもためさせない
 	liveFallback := proxied(nsBlueFallback, func(o *CachedOptions) {
-		o.key, o.path = blueKey, bluePath
 		o.fixedTtl, o.swr, o.errorTtl, o.log = sec, sec, min, false
 		o.response = ResponseRules{hide: []string{"access-control-allow-origin"}, cacheControl: "no-cache", set: blueMapHeaders}
 	})
@@ -198,7 +210,6 @@ func buildSites(d SiteDeps) *Sites {
 
 	// マーカー。toro-map-web が BlueMap のマーカーに Dynmap の地点 (一覧にだけ出す) を足して返す
 	markers := proxied(nsBlue, func(o *CachedOptions) {
-		o.key, o.path = blueKey, bluePath
 		o.fixedTtl, o.swr, o.errorTtl, o.log = sec, sec, min, false
 		o.response = ResponseRules{hide: []string{"access-control-allow-origin"}, cacheControl: "no-cache", set: blueMapHeaders}
 	})
@@ -212,14 +223,15 @@ func buildSites(d SiteDeps) *Sites {
 		idleTimeout:   5 * time.Minute,
 		log:           true,
 		rules:         &ResponseRules{hide: liveHide, cacheControl: "no-cache", set: blueMapHeaders},
+		limit:         sseLimit,
 	})
 	// ライブ情報 (プレイヤーの位置など) は BlueMap 内蔵の Web サーバーに聞く。BlueMap は max-age=86400 を付けて返すので、ブラウザに持たせない。
 	// 見ている人の数だけ聞くと toro-main に響くので、1 秒だけまとめる
 	live := cachedHandler(CachedOptions{
 		upstream:       d.live,
 		cache:          nsBlueLive,
-		key:            blueKey,
-		path:           bluePath,
+		key:            pathKey,
+		path:           pathOnly,
 		fixedTtl:       sec,
 		swr:            sec,
 		errorTtl:       10 * sec,
@@ -233,23 +245,29 @@ func buildSites(d SiteDeps) *Sites {
 	// 地図のデータ (タイル、テクスチャ、地図ごとの設定、プレイヤーの顔など)。
 	// 同じタイルを何人もが読むので 60 秒まとめる (Cloudflare の CDN-Cache-Control と同じ長さ)
 	mapData := proxied(nsBlue, func(o *CachedOptions) {
-		o.key, o.path = blueKey, bluePath
 		o.fixedTtl, o.swr, o.negativeTtl, o.tier, o.log = min, 30*sec, 5*sec, tierBest, false
 		o.response = ResponseRules{hide: []string{"access-control-allow-origin"}, set: append([][2]string{{"cdn-cache-control", "max-age=60"}}, blueMapHeaders...)}
 	})
 
 	blueRules := []Rule{
 		deny,
-		// /maps/<地図>/live/ はライブ情報 (markers.json は map-web、sse は流す、あとは BlueMap 本体)。それ以外は地図のデータ
+		// /maps/<地図>/live/ はライブ情報 (markers.json は map-web、sse は流す、players.json は BlueMap 本体)。それ以外は地図のデータ。
+		// ライブ情報はためきれないものが toro-main に届くので、知らない地図や知らない名前は聞きに行かない
 		prefixRule("/maps/", func(c *Ctx) {
-			if rest, ok := mapsLive(c.path); ok {
+			if id, rest, ok := mapsLive(c.path); ok {
+				if !d.blueMapStatic.knownMap(id) {
+					notFound(c)
+					return
+				}
 				switch rest {
 				case "markers.json":
 					markers(c)
 				case "sse":
 					sse(c)
-				default:
+				case "players.json":
 					live(c)
+				default:
+					notFound(c)
 				}
 				return
 			}
@@ -288,8 +306,16 @@ func buildSites(d SiteDeps) *Sites {
 			headerTimeout: 300 * time.Second,
 			idleTimeout:   300 * time.Second,
 			log:           true,
+			limit:         streamLimit,
 		})),
-		// 構造物の看板のブロックの形とテクスチャ (toro-map-web がクライアントの jar から作る) と、プレイヤーの頭のスキンの URL。Cache-Control のとおりためる
+		// プレイヤーの頭のスキンの URL。クエリは name と uuid だけを見る
+		exactRule("/mcassets/skin", proxied(nsBlue, func(o *CachedOptions) {
+			o.key = func(c *Ctx) string { return "skin?" + skinQuery(c.search) }
+			o.path = func(c *Ctx) (string, string) { return c.path, skinQuery(c.search) }
+			o.maxTtl, o.negativeTtl, o.tier = day, 5*sec, tierBest
+			o.response = ResponseRules{set: blueMapHeaders}
+		})),
+		// 構造物の看板のブロックの形とテクスチャ (toro-map-web がクライアントの jar から作る)。Cache-Control のとおりためる
 		prefixRule("/mcassets/", proxied(nsBlue, func(o *CachedOptions) {
 			o.maxTtl, o.negativeTtl, o.tier = day, 5*sec, tierBest
 			o.response = ResponseRules{set: blueMapHeaders}
@@ -314,6 +340,7 @@ func buildSites(d SiteDeps) *Sites {
 			headerTimeout: 30 * time.Second,
 			idleTimeout:   60 * time.Second,
 			log:           false,
+			limit:         streamLimit,
 		})),
 		prefixRule("/", notFound),
 	}
