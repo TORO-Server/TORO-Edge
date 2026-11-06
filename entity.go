@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"net/http"
 	"os"
 	"regexp"
@@ -24,6 +25,13 @@ const (
 	minCompress = 1024
 	// best の圧縮を待つ時間。間に合わなければ、そのときできている版 (なければ、そのまま) を返す
 	bestWait = 250 * time.Millisecond
+	// fast の圧縮を待つ時間。間に合わなければ、そのままの版を返す
+	fastWait = 2 * time.Second
+	// 圧縮を待っているものの上限 (段ごと)。待っているあいだ本文を抱えているので、数と大きさの両方を見る。いっぱいなら、そのままの版を返す
+	maxCompressJobs  = 256
+	maxCompressBytes = 128 << 20
+	// 本文と頭書きと鍵のほかにメモリに置くものの見積もり (構造体、頭書きの文字列、鍵を引く表と並びの 1 つぶん。実測で 1 KB 弱)
+	entityOverhead = 1024
 )
 
 // Tier は圧縮の力の入れ方。
@@ -38,11 +46,36 @@ const (
 
 var gates = [2]chan struct{}{make(chan struct{}, 4), make(chan struct{}, 2)}
 
+// compressQueue は圧縮を待っているものの数と大きさ (作っている最中のものも含む)
+type compressQueue struct {
+	mu    sync.Mutex
+	jobs  int
+	bytes int64
+}
+
+var compressQueues [2]compressQueue
+
+// admit は待ち行列に入れてよいか。空のときは、大きくても 1 つは入れる
+func (q *compressQueue) admit(n int64) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.jobs > 0 && (q.jobs >= maxCompressJobs || q.bytes+n > maxCompressBytes) {
+		return false
+	}
+	q.jobs++
+	q.bytes += n
+	return true
+}
+
+func (q *compressQueue) leave(n int64) {
+	q.mu.Lock()
+	q.jobs--
+	q.bytes -= n
+	q.mu.Unlock()
+}
+
 // sendfileMin はこの大きさ以上の本文を、メモリ上のファイルに置いて sendfile で送る (0 なら使わない。EDGE_SENDFILE_MIN)
 var sendfileMin = 64 << 10
-
-// fileGrace は捨てた返事のファイルを閉じるまでの待ち。送っている最中のものがあっても、書き込みの時間切れ (writeTimeout) より長く待つ
-const fileGrace = 2*writeTimeout + 30*time.Second
 
 // Variant は 1 つの表現 (そのまま、gzip、brotli)
 type Variant struct {
@@ -56,6 +89,12 @@ type Variant struct {
 	// 大きい本文のメモリ上のファイル (sendfile で送る)。なければ nil
 	file   *os.File
 	fileRC syscall.RawConn
+	// ファイルを使っている数 (送っている客と、持ち主の 1)。0 になったら閉じる
+	refs atomic.Int32
+	// 持ち主 (キャッシュや表) の 1 がまだあるか
+	owned atomic.Bool
+	// 捨てたあと、閉じるまでの大きさを数える先 (EntityCache の closing)。なければ nil
+	closing *atomic.Int64
 }
 
 // mem はこの版がメモリに置いている大きさ
@@ -77,16 +116,61 @@ func (v *Variant) attachFile(drop bool) {
 		return
 	}
 	v.file, v.fileRC = f, rc
+	v.refs.Store(1)
+	v.owned.Store(true)
 	if drop {
 		v.body = nil
+	}
+}
+
+// ref は送り始めるときに呼ぶ。もう閉じたファイルなら false
+func (v *Variant) ref() bool {
+	for {
+		n := v.refs.Load()
+		if n == 0 {
+			return false
+		}
+		if v.refs.CompareAndSwap(n, n+1) {
+			return true
+		}
+	}
+}
+
+// unref は送り終えたときに呼ぶ。最後の 1 つならファイルを閉じる
+func (v *Variant) unref() {
+	if v.refs.Add(-1) == 0 {
+		v.closeFile()
+	}
+}
+
+func (v *Variant) closeFile() {
+	v.file.Close()
+	if v.closing != nil {
+		v.closing.Add(-int64(v.size))
+	}
+}
+
+// dropOwner は持ち主が手放すとき (何度呼んでも 1 度だけ効く)。キャッシュのロックを持ったまま呼ばれるので、閉じるのは裏で行う
+func (v *Variant) dropOwner(closing *atomic.Int64) {
+	if v.file == nil || !v.owned.CompareAndSwap(true, false) {
+		return
+	}
+	if closing != nil {
+		v.closing = closing
+		closing.Add(int64(v.size))
+	}
+	if v.refs.Add(-1) == 0 {
+		go v.closeFile()
 	}
 }
 
 // slot は圧縮した版の置き場 (最初に求められたとき 1 度だけ裏で作る)
 type slot struct {
 	once sync.Once
-	done chan struct{}
-	v    atomic.Pointer[Variant]
+	// done を作り終えた (ここまで来れば once を通らなくてよい)
+	started atomic.Bool
+	done    chan struct{}
+	v       atomic.Pointer[Variant]
 }
 
 type entityInit struct {
@@ -130,6 +214,8 @@ type Entity struct {
 	varies bool
 	// 大きい本文をメモリ上のファイルにも置く (attachFiles のあと。キャッシュや静的なファイルに入れるもの)
 	files bool
+	// 捨てられた (キャッシュや表から外れた)。もう圧縮した版を作らない
+	retired atomic.Bool
 
 	// キャッシュに入っているあいだ (cache.go。ns, key, elem は EntityCache の mu で守る)
 	ns   *nsCache
@@ -165,9 +251,9 @@ func newEntity(init entityInit) *Entity {
 	return e
 }
 
-// bytes はメモリに置いている大きさ (見積もり)
+// bytes はメモリに置いている大きさ (見積もり)。鍵も数える
 func (e *Entity) bytes() int {
-	n := e.identity.mem() + 1024
+	n := e.identity.mem() + entityOverhead + len(e.key)
 	if v := e.br.v.Load(); v != nil {
 		n += v.mem()
 	}
@@ -183,12 +269,13 @@ func (e *Entity) attachFiles() {
 	e.identity.attachFile(false)
 }
 
-// retire はキャッシュから捨てたとき。送っている最中のものがあるので、少し待ってからファイルを閉じる
-func (e *Entity) retire() {
+// retire はキャッシュや表から捨てたとき。ファイルは、送っている最中の客がいなくなったら閉じる。
+// closing があれば、閉じるまでの大きさをそこに数える
+func (e *Entity) retire(closing *atomic.Int64) {
+	e.retired.Store(true)
 	for _, v := range [3]*Variant{e.identity, e.br.v.Load(), e.gz.v.Load()} {
-		if v != nil && v.file != nil {
-			f := v.file
-			time.AfterFunc(fileGrace, func() { f.Close() })
+		if v != nil {
+			v.dropOwner(closing)
 		}
 	}
 }
@@ -290,28 +377,41 @@ func (e *Entity) ensure(enc int) *Variant {
 		if wantBr {
 			s = &e.br
 		}
-		e.start(s, wantBr)
-		<-s.done
+		if !e.start(s, wantBr, true) {
+			return e.identity
+		}
+		select {
+		case <-s.done:
+		default:
+			timer := time.NewTimer(fastWait)
+			defer timer.Stop()
+			select {
+			case <-s.done:
+			case <-timer.C:
+				return e.identity
+			}
+		}
 		if v := s.v.Load(); v != nil {
 			return v
 		}
 		return e.identity
 	}
 	// best: br を裏で作り、待つのは少しだけ。そのあいだ軽い gzip も作る
-	if wantBr {
-		e.start(&e.br, true)
-	}
-	e.start(&e.gz, false)
-	timer := time.NewTimer(bestWait)
-	defer timer.Stop()
 	var order [2]*slot
 	n := 0
-	if wantBr {
+	if wantBr && e.start(&e.br, true, true) {
 		order[n] = &e.br
 		n++
 	}
-	order[n] = &e.gz
-	n++
+	if e.start(&e.gz, false, true) {
+		order[n] = &e.gz
+		n++
+	}
+	if n == 0 {
+		return e.identity
+	}
+	timer := time.NewTimer(bestWait)
+	defer timer.Stop()
 	for _, s := range order[:n] {
 		select {
 		case <-s.done:
@@ -330,23 +430,56 @@ func (e *Entity) warm() {
 	if !e.compressible {
 		return
 	}
-	e.start(&e.br, true)
-	e.start(&e.gz, false)
+	// 手元のファイルの数だけなので、待ち行列の上限は見ない
+	e.start(&e.br, true, false)
+	e.start(&e.gz, false, false)
 }
 
-func (e *Entity) start(s *slot, br bool) {
+// start は圧縮した版を裏で作り始める。始めなかった (待ち行列がいっぱい、捨てられたあと) ときは false で、次に求められたときにやり直す
+func (e *Entity) start(s *slot, br, bounded bool) bool {
+	if s.started.Load() {
+		return true
+	}
+	if e.retired.Load() {
+		return false
+	}
+	n := int64(len(e.init.body))
+	q := &compressQueues[e.tier]
+	if bounded && !q.admit(n) {
+		return false
+	}
+	first := false
 	s.once.Do(func() {
+		first = true
 		s.done = make(chan struct{})
 		go func() {
 			defer close(s.done)
+			if bounded {
+				defer q.leave(n)
+			}
 			gate := gates[e.tier]
 			gate <- struct{}{}
 			defer func() { <-gate }()
+			// 裏で panic しても全体を止めない (そのままの版を返し続ける)
+			defer func() {
+				if rec := recover(); rec != nil {
+					fmt.Fprintln(os.Stderr, "compress:", rec)
+				}
+			}()
+			// 待っているあいだに捨てられたものは作らない
+			if e.retired.Load() {
+				return
+			}
 			if v := e.build(br); v != nil {
 				e.publish(s, v)
 			}
 		}()
 	})
+	s.started.Store(true)
+	if bounded && !first {
+		q.leave(n)
+	}
+	return true
 }
 
 func (e *Entity) build(br bool) *Variant {
@@ -392,7 +525,7 @@ func (e *Entity) build(br bool) *Variant {
 	} else {
 		v = e.makeVariant("gzip", buf.Bytes(), variantEtag(e.etag, "gz"))
 	}
-	if e.files {
+	if e.files && !e.retired.Load() {
 		v.attachFile(true)
 	}
 	return v

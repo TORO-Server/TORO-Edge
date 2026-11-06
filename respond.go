@@ -29,6 +29,17 @@ func (c *Ctx) debugLine() []byte {
 	return cn.dbg
 }
 
+// armWrite は書き込みの期限を付ける。どの返事も期限なしでは書かない (読まない客に待たされない)。
+// 小さい返事は、残りが半分あるあいだ付け直さない (タイマーの手間を毎回かけない)。full なら長さいっぱいに付け直す
+func (cn *conn) armWrite(now time.Time, full bool) {
+	limit := cn.srv.writeTimeout
+	if !full && cn.writeUntil.Sub(now) > limit/2 {
+		return
+	}
+	cn.writeUntil = now.Add(limit)
+	cn.nc.SetWriteDeadline(cn.writeUntil)
+}
+
 // write は 頭書き (状態の行から、最後の空行の前まで) + Date + extra + 空行 + 本文 を、1 回の writev で送る
 func (c *Ctx) write(status int, head, extra, body []byte) error {
 	cn := c.conn
@@ -37,8 +48,9 @@ func (c *Ctx) write(status int, head, extra, body []byte) error {
 	if cn.closing() {
 		tail = connCloseTail
 	}
+	now := time.Now()
 	iov := cn.iov[:0]
-	iov = append(iov, head, dateLine(time.Now()))
+	iov = append(iov, head, dateLine(now))
 	if len(extra) > 0 {
 		iov = append(iov, extra)
 	}
@@ -48,14 +60,8 @@ func (c *Ctx) write(status int, head, extra, body []byte) error {
 		c.bytes = int64(len(body))
 	}
 	cn.bufs = iov
-	big := len(body) > bigWrite
-	if big {
-		cn.nc.SetWriteDeadline(time.Now().Add(writeTimeout))
-	}
+	cn.armWrite(now, len(body) > bigWrite)
 	_, err := cn.bufs.WriteTo(cn.nc)
-	if big {
-		cn.nc.SetWriteDeadline(time.Time{})
-	}
 	if err != nil {
 		cn.closeAfter = true
 	}
@@ -91,8 +97,13 @@ func sendEntity(c *Ctx, e *Entity) {
 		v = e.ensure(c.enc)
 	}
 	if v.file != nil && !c.head {
-		c.writeFile(e.status, v)
-		return
+		if v.ref() {
+			c.writeFile(e.status, v)
+			v.unref()
+			return
+		}
+		// 捨てられてファイルを閉じたあと: そのままの版をメモリから送る
+		v = e.identity
 	}
 	c.write(e.status, v.head, c.debugLine(), v.body)
 }
@@ -100,8 +111,7 @@ func sendEntity(c *Ctx, e *Entity) {
 // writeFile は頭書きを writev で、本文をメモリ上のファイルから sendfile で送る
 func (c *Ctx) writeFile(status int, v *Variant) {
 	cn := c.conn
-	cn.nc.SetWriteDeadline(time.Now().Add(writeTimeout))
-	defer cn.nc.SetWriteDeadline(time.Time{})
+	cn.armWrite(time.Now(), true)
 	if err := c.write(status, v.head, c.debugLine(), nil); err != nil {
 		return
 	}
@@ -200,7 +210,7 @@ func (s *stream) write(p []byte) error {
 		iov = append(iov, p)
 	}
 	cn.bufs = iov
-	cn.nc.SetWriteDeadline(time.Now().Add(writeTimeout))
+	cn.armWrite(time.Now(), true)
 	_, err := cn.bufs.WriteTo(cn.nc)
 	if err != nil {
 		cn.closeAfter = true
@@ -218,11 +228,10 @@ func (s *stream) finish() {
 		return
 	}
 	cn := s.c.conn
-	cn.nc.SetWriteDeadline(time.Now().Add(writeTimeout))
+	cn.armWrite(time.Now(), true)
 	if _, err := cn.nc.Write(lastChunk); err != nil {
 		cn.closeAfter = true
 	}
-	cn.nc.SetWriteDeadline(time.Time{})
 }
 
 // watcher は流しているあいだ、客が切れたかを見張る (次のリクエストの先頭は、読まずに残す)

@@ -25,9 +25,26 @@ const (
 	idleTimeout       = 125 * time.Second
 	readHeaderTimeout = 30 * time.Second
 	writeTimeout      = 120 * time.Second
-	// これより大きい本文を送るときは、止まった客に待たされないよう、書く時間に上限を付ける
+	// これより大きい本文を送るときは、書く時間をいっぱいに付け直す (小さいものは、前に付けた期限の残りで足りる)
 	bigWrite = 256 << 10
 )
+
+// 頭書きの名前とメソッドに使える文字 (RFC 9110 の token) と、頭書きの値に入れてはいけない文字 (タブ以外の制御文字)
+var tokenChar, badValueChar = func() (token, bad [256]bool) {
+	for c := 0; c < 256; c++ {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			token[c] = true
+		case strings.IndexByte("!#$%&'*+-.^_`|~", byte(c)) >= 0:
+			token[c] = true
+		}
+		bad[c] = (c < 0x20 && c != '\t') || c == 0x7f
+	}
+	return
+}()
+
+// 読む頭書きは seen のビットで覚えるので、32 個まで
+var _ [32 - numHdr]struct{}
 
 var (
 	crlf          = []byte("\r\n")
@@ -81,10 +98,12 @@ type Server struct {
 	ln      net.Listener
 	ctxPool sync.Pool
 	rdPool  sync.Pool
+	// 書き込みの期限 (Serve の前に決める)
+	writeTimeout time.Duration
 }
 
 func newServer(handler func(c *Ctx), onDone func(c *Ctx)) *Server {
-	s := &Server{handler: handler, onDone: onDone}
+	s := &Server{handler: handler, onDone: onDone, writeTimeout: writeTimeout}
 	s.ctxPool.New = func() any { return new(Ctx) }
 	s.rdPool.New = func() any { return bufio.NewReaderSize(nil, maxHeaderBytes) }
 	return s
@@ -137,6 +156,8 @@ type conn struct {
 	idle atomic.Bool
 	// この返事のあとで、つなぎを閉じる
 	closeAfter bool
+	// いま付いている書き込みの期限 (armWrite)
+	writeUntil time.Time
 	// sendfile に使う raw 口 (必要になったとき求める)
 	rc syscall.RawConn
 	// writev に渡す並び (返事ごとに作り直さない)
@@ -268,11 +289,18 @@ func (cn *conn) readRequest() (int, error) {
 	case "HEAD":
 		req.Method = "HEAD"
 	default:
+		for _, b := range line[:sp1] {
+			if !tokenChar[b] {
+				return http.StatusBadRequest, errBadRequest
+			}
+		}
 		req.Method = string(line[:sp1])
 	}
 	req.Target = string(target)
 
 	var lower [40]byte
+	// 出てきた頭書き (値が空でも、重複と Transfer-Encoding を見落とさない)
+	var seen uint32
 	for {
 		line, err = br.ReadSlice('\n')
 		if err != nil {
@@ -301,31 +329,40 @@ func (cn *conn) readRequest() (int, error) {
 			return http.StatusBadRequest, errBadRequest
 		}
 		name := line[:colon]
-		if bytes.IndexByte(name, ' ') >= 0 || bytes.IndexByte(name, '\t') >= 0 {
-			return http.StatusBadRequest, errBadRequest
+		known := len(name) <= len(lower)
+		for i, b := range name {
+			if !tokenChar[b] {
+				return http.StatusBadRequest, errBadRequest
+			}
+			if known {
+				if b >= 'A' && b <= 'Z' {
+					b += 32
+				}
+				lower[i] = b
+			}
 		}
 		value := bytes.Trim(line[colon+1:], " \t")
-		if bytes.IndexByte(value, '\r') >= 0 || bytes.IndexByte(value, 0) >= 0 {
-			return http.StatusBadRequest, errBadRequest
-		}
-		if len(name) > len(lower) {
-			continue
-		}
-		for i, b := range name {
-			if b >= 'A' && b <= 'Z' {
-				b += 32
+		for _, b := range value {
+			if badValueChar[b] {
+				return http.StatusBadRequest, errBadRequest
 			}
-			lower[i] = b
+		}
+		if !known {
+			continue
 		}
 		id, ok := hdrIDs[string(lower[:len(name)])]
 		if !ok {
 			continue
 		}
-		if req.h[id] == "" {
-			req.h[id] = string(value)
-		} else if id == hContentLength || id == hHost {
+		bit := uint32(1) << id
+		dup := seen&bit != 0
+		seen |= bit
+		switch {
+		case dup && (id == hContentLength || id == hHost):
 			return http.StatusBadRequest, errBadRequest
-		} else {
+		case req.h[id] == "":
+			req.h[id] = string(value)
+		default:
 			req.h[id] += ", " + string(value)
 		}
 	}
@@ -333,10 +370,17 @@ func (cn *conn) readRequest() (int, error) {
 	if req.http11 && req.Host == "" {
 		return http.StatusBadRequest, errBadRequest
 	}
-	if cl := req.h[hContentLength]; cl != "" && cl != "0" {
-		req.hasBody = true
+	if seen&(1<<hContentLength) != 0 {
+		cl := req.h[hContentLength]
+		if cl == "" {
+			return http.StatusBadRequest, errBadRequest
+		}
+		if cl != "0" {
+			req.hasBody = true
+		}
 	}
-	if req.h[hTransferEncoding] != "" {
+	// Transfer-Encoding は値によらず、あれば本文があるものとして断る
+	if seen&(1<<hTransferEncoding) != 0 {
 		req.hasBody = true
 	}
 	connection := req.h[hConnection]

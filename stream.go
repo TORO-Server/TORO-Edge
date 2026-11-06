@@ -23,6 +23,8 @@ type StreamOptions struct {
 	// 本文が止まっていてよい時間
 	idleTimeout time.Duration
 	log         bool
+	// 客ごとの同時に流す数の上限
+	limit *ipLimit
 }
 
 // streamHandler はためずに、元の返事をそのまま客へ流す (動画、Range、SSE、権限をそのつど元が確かめるもの)
@@ -30,6 +32,12 @@ func streamHandler(o StreamOptions) Handler {
 	return func(c *Ctx) {
 		c.log = o.log
 		c.cache = "BYPASS"
+		ipKey := clientKey(c.req)
+		if !o.limit.enter(ipKey) {
+			tooManyStreams(c)
+			return
+		}
+		defer o.limit.leave(ipKey)
 		headers := baseUpstreamHeaders(c.req)
 		for _, id := range o.forward {
 			if v := c.req.h[id]; v != "" {
@@ -55,6 +63,7 @@ func relayRequest(c *Ctx, up *Upstream, q UpstreamRequest, idle time.Duration, r
 	defer cancel()
 	w := cn.watch(cancel)
 	defer cn.stopWatch(w)
+	q.stream = true
 	resp, cancelResp, err := up.do(ctx, q)
 	if err != nil {
 		badGateway(c)

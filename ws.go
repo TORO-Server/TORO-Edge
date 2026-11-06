@@ -16,6 +16,8 @@ const maxSockets = 4096
 var (
 	wsMu    sync.Mutex
 	wsConns = map[net.Conn]struct{}{}
+	// 枠を取った数 (つなぎに行く前に取る)
+	wsSlots int
 )
 
 var wsForward = []hid{hSecWSKey, hSecWSVersion, hSecWSProtocol, hSecWSExtensions, hOrigin, hUserAgent, hCfConnectingIP}
@@ -51,13 +53,27 @@ func proxyUpgrade(c *Ctx, target Endpoint, path string) {
 	cn := c.conn
 	// つなぎはこのあと WebSocket のものになるので、終わったら閉じる
 	cn.closeAfter = true
+	ipKey := clientKey(c.req)
+	if !socketLimit.enter(ipKey) {
+		tooManyStreams(c)
+		return
+	}
+	defer socketLimit.leave(ipKey)
 	wsMu.Lock()
-	full := len(wsConns) >= maxSockets*2
+	full := wsSlots >= maxSockets
+	if !full {
+		wsSlots++
+	}
 	wsMu.Unlock()
 	if full {
 		sendText(c, http.StatusServiceUnavailable, "Service Unavailable\n")
 		return
 	}
+	defer func() {
+		wsMu.Lock()
+		wsSlots--
+		wsMu.Unlock()
+	}()
 	up, err := net.DialTimeout("tcp", target.Addr(), 10*time.Second)
 	if err != nil {
 		badGateway(c)
@@ -97,7 +113,6 @@ func proxyUpgrade(c *Ctx, target Endpoint, path string) {
 		badGateway(c)
 		return
 	}
-	up.SetDeadline(time.Time{})
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		resp.Body.Close()
 		up.Close()
@@ -120,7 +135,6 @@ func proxyUpgrade(c *Ctx, target Endpoint, path string) {
 		up.Close()
 		return
 	}
-	cn.nc.SetWriteDeadline(time.Time{})
 	c.status = http.StatusSwitchingProtocols
 	tcpTune(cn.nc)
 	// それぞれが先に読んでしまっていた分
@@ -132,6 +146,8 @@ func proxyUpgrade(c *Ctx, target Endpoint, path string) {
 		b, _ := cn.br.Peek(n)
 		up.Write(b)
 	}
+	up.SetDeadline(time.Time{})
+	cn.nc.SetWriteDeadline(time.Time{})
 
 	client := cn.nc
 	wsMu.Lock()
@@ -156,11 +172,13 @@ func proxyUpgrade(c *Ctx, target Endpoint, path string) {
 	tcClient := &timeoutConn{Conn: client, timeout: wsIdleTimeout}
 	tcUp := &timeoutConn{Conn: up, timeout: wsIdleTimeout}
 	go func() {
+		// ここで panic しても全体を止めない
+		defer func() { recover() }()
+		defer end()
 		io.Copy(tcUp, tcClient)
-		end()
 	}()
+	defer end()
 	io.Copy(tcClient, tcUp)
-	end()
 }
 
 // closeAllSockets は止めるとき: つながっている WebSocket を閉じる (ブラウザは、つなぎ直すか、取りに来る方に戻る)

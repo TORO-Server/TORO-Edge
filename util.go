@@ -176,9 +176,13 @@ func asciiEqualFold(a, b string) bool {
 	return true
 }
 
-// denyPath は返してはいけないパス: .php (.php5 など) で終わるもの、/. で始まる部分 (隠しファイル) があるもの
+// denyPath は返してはいけないパス: .php (.php5 など) で終わるもの、/. で始まる部分 (隠しファイル) があるもの、
+// エンコードしたドット・スラッシュ・バックスラッシュ・NUL があるもの (元でデコードされて、ここの判定をすり抜けないように)
 func denyPath(p string) bool {
 	if strings.Contains(p, "/.") {
+		return true
+	}
+	if strings.IndexByte(p, '%') >= 0 && hasEncodedDelimiter(p) {
 		return true
 	}
 	n := len(p)
@@ -191,25 +195,53 @@ func denyPath(p string) bool {
 	return false
 }
 
-// mapsLive は /maps/<地図>/live/<rest> の rest を取り出す
-func mapsLive(path string) (string, bool) {
+// hasEncodedDelimiter は %2e %2f %5c %00 があるか (大文字小文字は区別しない)
+func hasEncodedDelimiter(p string) bool {
+	for i := 0; i+2 < len(p); i++ {
+		if p[i] != '%' {
+			continue
+		}
+		a, b := p[i+1], p[i+2]|0x20
+		if (a == '2' && (b == 'e' || b == 'f')) || (a == '5' && b == 'c') || (a == '0' && p[i+2] == '0') {
+			return true
+		}
+	}
+	return false
+}
+
+// mapsLive は /maps/<地図>/live/<rest> の地図と rest を取り出す
+func mapsLive(path string) (string, string, bool) {
 	const pre = "/maps/"
 	if !strings.HasPrefix(path, pre) {
-		return "", false
+		return "", "", false
 	}
 	r := path[len(pre):]
 	i := strings.IndexByte(r, '/')
 	if i <= 0 {
-		return "", false
+		return "", "", false
 	}
+	id := r[:i]
 	r = r[i+1:]
 	if !strings.HasPrefix(r, "live/") {
-		return "", false
+		return "", "", false
 	}
-	return r[len("live/"):], true
+	return id, r[len("live/"):], true
 }
 
-// upWorld は /up/world/<ワールド>/... のワールドを取り出す
+// isDigits は 1 文字以上の数字だけか
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// upWorld は /up/world/<ワールド>/<時刻> のワールドを取り出す。時刻は数字だけ (ブラウザは失敗すると 1 を引くので、負も受ける)
 func upWorld(path string) (string, bool) {
 	const pre = "/up/world/"
 	if !strings.HasPrefix(path, pre) {
@@ -220,7 +252,47 @@ func upWorld(path string) (string, bool) {
 	if i <= 0 {
 		return "", false
 	}
+	ts := strings.TrimPrefix(r[i+1:], "-")
+	if len(ts) > 20 || !isDigits(ts) {
+		return "", false
+	}
 	return r[:i], true
+}
+
+// tileQuery は /tiles/ のクエリのうち、map-web が見る timestamp=<数字> だけを取り出す (なければ "")
+func tileQuery(search string) string {
+	if search == "" {
+		return ""
+	}
+	for q := search[1:]; q != ""; {
+		part := q
+		if i := strings.IndexByte(q, '&'); i >= 0 {
+			part, q = q[:i], q[i+1:]
+		} else {
+			q = ""
+		}
+		if v, ok := strings.CutPrefix(part, "timestamp="); ok && isDigits(v) {
+			return part
+		}
+	}
+	return ""
+}
+
+// skinQuery は /mcassets/skin のクエリのうち、name と uuid だけを並べる (ほかのものを変えて別のものとしてためさせない)
+func skinQuery(search string) string {
+	if search == "" {
+		return ""
+	}
+	var out strings.Builder
+	for _, part := range strings.Split(search[1:], "&") {
+		if strings.HasPrefix(part, "name=") || strings.HasPrefix(part, "uuid=") {
+			if out.Len() > 0 {
+				out.WriteByte('&')
+			}
+			out.WriteString(part)
+		}
+	}
+	return out.String()
 }
 
 // assetFile は /<12 文字>.<拡張子> のファイル名を取り出す

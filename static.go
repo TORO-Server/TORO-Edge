@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/json"
 	"io/fs"
 	"net/url"
 	"os"
@@ -97,6 +98,8 @@ type rec struct {
 
 	mu       sync.Mutex
 	entities map[*StaticRules]*Entity
+	// ファイルが変わって、新しいものに入れ替えたあと
+	retired bool
 }
 
 // entity はこの決まりで返すときの返事 (圧縮した版は、はじめて作ったときに裏で用意する)
@@ -106,11 +109,24 @@ func (r *rec) entity(rules *StaticRules) *Entity {
 	e := r.entities[rules]
 	if e == nil {
 		e = newEntity(entityInit{status: 200, typ: r.typ, body: r.body, etag: r.etag, lastModified: r.lastMod, headers: rules.headers, tier: tierBest})
-		e.attachFiles()
 		r.entities[rules] = e
-		e.warm()
+		// 入れ替えたあとに来た客の分は、メモリから返す (閉じる人のいないファイルを作らない)
+		if !r.retired {
+			e.attachFiles()
+			e.warm()
+		}
 	}
 	return e
+}
+
+// retire は新しいものに入れ替えたとき。返事のファイルを閉じる (送っている最中の客がいれば、終わってから)
+func (r *rec) retire() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.retired = true
+	for _, e := range r.entities {
+		e.retire(nil)
+	}
 }
 
 type loadFlight struct {
@@ -130,6 +146,8 @@ type StaticSite struct {
 
 	rootOnce sync.Once
 	realRoot string
+
+	maps atomic.Pointer[mapIDs]
 }
 
 func newStaticSite(root string, exclude ...string) *StaticSite {
@@ -171,6 +189,38 @@ func (s *StaticSite) peek(rel string, tr *Transform) *rec {
 		go s.recheck(key, rel, r, tr)
 	}
 	return r
+}
+
+// mapIDs は settings.json の maps (ファイルが変わったら作り直す)。ids が nil なら読めなかった
+type mapIDs struct {
+	from *rec
+	ids  map[string]bool
+}
+
+// knownMap は BlueMap の settings.json に書かれた地図か。読めないとき (ファイルがない、形が違う) は止めないよう true
+func (s *StaticSite) knownMap(id string) bool {
+	r := s.peek("settings.json", nil)
+	if r == nil {
+		r = s.load("settings.json", nil)
+	}
+	if r == nil {
+		return true
+	}
+	m := s.maps.Load()
+	if m == nil || m.from != r {
+		m = &mapIDs{from: r}
+		var v struct {
+			Maps []string `json:"maps"`
+		}
+		if json.Unmarshal(r.body, &v) == nil && v.Maps != nil {
+			m.ids = make(map[string]bool, len(v.Maps))
+			for _, name := range v.Maps {
+				m.ids[name] = true
+			}
+		}
+		s.maps.Store(m)
+	}
+	return m.ids == nil || m.ids[id]
 }
 
 // load はディスクから読む (同じファイルを同時に読まない)
@@ -233,6 +283,7 @@ func (s *StaticSite) recheck(key, rel string, r *rec, tr *Transform) {
 		delete(s.recs, key)
 	}
 	s.mu.Unlock()
+	r.retire()
 }
 
 func (s *StaticSite) read(rel string, tr *Transform) *rec {
