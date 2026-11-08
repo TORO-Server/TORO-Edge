@@ -12,7 +12,7 @@ Go 製。標準ライブラリと brotli のライブラリだけで、イメー
 ## イメージ
 
 GitHub Actions が、試験に通ったものだけを GHCR に置きます (linux/amd64 と linux/arm64)。
-リポジトリもイメージ (`ghcr.io/toro-server/toro-edge`) も非公開です。使うサーバーでは、先に `read:packages` だけの Personal access token (classic) で入っておきます。
+イメージは `ghcr.io/toro-server/toro-edge` にあります。
 
 ```bash
 echo "<read:packages だけの PAT>" | docker login ghcr.io -u <GitHub のユーザー名> --password-stdin
@@ -135,7 +135,3 @@ cd conformance && EDGE_BIN=../toro-edge go test -count=1 .   # 偽の元のサ�
 外の部品は、Go の標準ライブラリと、すでに使っている brotli だけです。
 `conformance/tools/bench` と `cpuprobe.sh` は、負荷をかけて、入り口のコンテナが使った CPU を 1 リクエストあたりで測ります (`cpuprobe.sh` の最後の引数で、負荷をかける側の CPU と workers を増やせます)。`coldpass` は、空のキャッシュに同じ URL を 1 回ずつ取って、元に聞きに行く経路の時間を測ります。
 これらの道具は、`docker build -f conformance/tools/Dockerfile -t toro-edge:tools .` で 1 つのイメージにできます。
-
-## ライセンス
-
-未設定です (非公開のリポジトリなので、TORO サーバーの中だけで使います。公開するときに決めます)。
