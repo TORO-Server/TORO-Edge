@@ -184,7 +184,7 @@ func TestRewrites(t *testing.T) {
 		asset := e.blue("/assets/a.png")
 		eq(t, asset.h("Cache-Control"), "public, max-age=86400, stale-if-error=604800")
 		eq(t, asset.h("CDN-Cache-Control"), "max-age=60")
-		// maps/ は静的に返さない (map-web に聞く)
+		// maps/ は静的に返さない (toro-webmap に聞く)
 		e.mapweb.setHandler(notFound)
 		eq(t, e.blue("/maps/hidden.json").status, 404)
 		eq(t, e.mapweb.hitCount("/maps/hidden.json"), 1)
@@ -650,7 +650,7 @@ func TestUpstreamAlreadyCompressed(t *testing.T) {
 }
 
 func TestBlueMapLive(t *testing.T) {
-	// BlueMap 本体に聞き、1 秒まとめ、頭書きを付け替える。落ちていたら DB の版 (map-web) へ
+	// BlueMap 本体に聞き、1 秒まとめ、頭書きを付け替える。落ちていたら DB の版 (toro-webmap) へ
 	withEnv(t, none(), func(e *env) {
 		e.live.setHandler(func(w http.ResponseWriter, _ *http.Request) {
 			sendText(w, 200, hdr("content-type", "application/json", "cache-control", "max-age=86400", "content-security-policy", "default-src none", "x-content-type-options", "x"), `{"players":[]}`)
@@ -676,7 +676,7 @@ func TestBlueMapLive(t *testing.T) {
 		eq(t, e.mapweb.hitCount(url), 0)
 		eq(t, e.live.seenAt(0).Header.Get("Host"), "3d-map.torosaba.net")
 
-		// マーカーは map-web (Dynmap の地点を足したもの)
+		// マーカーは toro-webmap (Dynmap の地点を足したもの)
 		e.mapweb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
 			sendText(w, 200, hdr("content-type", "application/json", "cache-control", "no-cache", "access-control-allow-origin", "*"), `{"merged":true}`)
 		})
@@ -690,7 +690,7 @@ func TestBlueMapLive(t *testing.T) {
 		e.mapweb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
 			sendText(w, 200, hdr("content-type", "application/json", "cache-control", "public, max-age=3600", "access-control-allow-origin", "*"), `{"players":["last-from-db"]}`)
 		})
-		// まだためていない (古いものもない) ものは、map-web が DB から返す。ためてあるものは errorTtl のあいだ古い版を返す
+		// まだためていない (古いものもない) ものは、toro-webmap が DB から返す。ためてあるものは errorTtl のあいだ古い版を返す
 		fallback := e.blue("/maps/other/live/players.json?x=1")
 		eq(t, fallback.status, 200)
 		eq(t, fallback.h("X-Edge-Cache"), "MISS")
@@ -851,7 +851,7 @@ func TestMethodsAndURL(t *testing.T) {
 		eq(t, post.h("Allow"), "GET, HEAD")
 		eq(t, e.get("/live/clients", reqOpts{method: "POST"}).status, 405)
 		eq(t, e.get("/"+strings.Repeat("a", 9000)).status, 414)
-		// 内側のための /live/ は、外から GET しても map-web に届かない (map.torosaba.net 側は静的なファイルとして探して 404)
+		// 内側のための /live/ は、外から GET しても toro-webmap に届かない (map.torosaba.net 側は静的なファイルとして探して 404)
 		eq(t, e.get("/live/plugin").status, 404)
 		eq(t, e.mapweb.seenLen(), 0)
 	})
@@ -1005,7 +1005,7 @@ func TestErrorReplies(t *testing.T) {
 		})
 		miss := e.blue("/_nuxt/old-chunk.js")
 		eq(t, miss.status, 404)
-		// BlueMap の CSP に置き換えず、map-web が返したままにする
+		// BlueMap の CSP に置き換えず、toro-webmap が返したままにする
 		eq(t, miss.h("Content-Security-Policy"), "script-src 'none'")
 		// 404 は少しのあいだだけ覚える (古い画面が消えたファイルを何度も聞きに来る)
 		e.blue("/_nuxt/old-chunk.js")
