@@ -119,7 +119,7 @@ func TestRouteMatchers(t *testing.T) {
 	}
 }
 
-// /tiles/ と /mcassets/skin は、map-web が見るものだけをクエリに残す (ほかを変えても別のものにならない)
+// /tiles/ と /mcassets/skin は、toro-webmap が見るものだけをクエリに残す (ほかを変えても別のものにならない)
 func TestQueryFilters(t *testing.T) {
 	tiles := map[string]string{
 		"":                       "",

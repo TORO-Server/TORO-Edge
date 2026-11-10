@@ -43,7 +43,7 @@ func replaceOnce(id, search, replacement string) *Transform {
 }
 
 var (
-	// Dynmap の前の画面 (index.html)。軽くするスクリプト (map-web/client/dynmap-client.ts) を、Dynmap の js を読み終えたところに差し込む。
+	// Dynmap の前の画面 (index.html)。軽くするスクリプト (TORO-WebMap の client/dynmap-client.ts) を、Dynmap の js を読み終えたところに差し込む。
 	// Cloudflare がブラウザに 4 時間持たせるので、スクリプトを変えたら ?v= の数を上げる
 	transformLegacy = replaceOnce("legacy", `<script type="text/javascript" src="standalone/config.js`,
 		"<script type=\"text/javascript\" src=\"toro/dynmap-client.js?v=2\"></script>\n\t<script type=\"text/javascript\" src=\"standalone/config.js")
@@ -92,7 +92,7 @@ func buildSites(d SiteDeps) *Sites {
 	pathKey := func(c *Ctx) string { return c.path }
 	pathOnly := func(c *Ctx) (string, string) { return c.path, "" }
 
-	// proxied は map-web (Nuxt) の返事をためて返す。クエリを使うものは key と path を決める
+	// proxied は toro-webmap (Nuxt) の返事をためて返す。クエリを使うものは key と path を決める
 	proxied := func(ns *nsCache, mutate func(o *CachedOptions)) Handler {
 		o := CachedOptions{
 			upstream:       d.mapWeb,
@@ -125,7 +125,7 @@ func buildSites(d SiteDeps) *Sites {
 
 	mapRules := []Rule{
 		deny,
-		// 地図の画面は toro-map-web (map-web/app/、Nuxt) が返す
+		// 地図の画面は toro-webmap (TORO-WebMap の app/、Nuxt) が返す
 		exactRule("/", proxied(nsMap, func(o *CachedOptions) {
 			o.fixedTtl, o.swr = 10*sec, min
 			o.response = ResponseRules{cacheControl: "no-cache", set: [][2]string{{"content-language", "ja"}}}
@@ -135,7 +135,7 @@ func buildSites(d SiteDeps) *Sites {
 		})),
 		// 前の画面へのリンク (index.html?worldname=...) は新しい画面へ
 		exactRule("/index.html", redirectToRoot),
-		// ホーム画面に追加するための Service Worker (map-web/client/sw.ts) と、アイコンなど (map-web/public/pwa/)。
+		// ホーム画面に追加するための Service Worker (TORO-WebMap の client/sw.ts) と、アイコンなど (TORO-WebMap の public/pwa/)。
 		// Service Worker は更新がすぐ届くよう、毎回確かめさせる
 		exactRule("/sw.js", proxied(nsMap, func(o *CachedOptions) {
 			o.fixedTtl, o.swr = 10*sec, 30*sec
@@ -168,7 +168,7 @@ func buildSites(d SiteDeps) *Sites {
 		exactRule("/up/ws", func(c *Ctx) { sendText(c, http.StatusUpgradeRequired, "Upgrade Required\n", "Upgrade", "websocket") }),
 		// Web チャットやログインは使っていない
 		prefixRule("/up/", notFound),
-		// 地図のタイル、マーカー、プレイヤーの顔。キャッシュの長さは map-web の Cache-Control に従う (なければ 5 分)
+		// 地図のタイル、マーカー、プレイヤーの顔。キャッシュの長さは toro-webmap の Cache-Control に従う (なければ 5 分)
 		// 描き直したタイルは ?timestamp= で別の URL になる (クエリはこれだけを見る)
 		prefixRule("/tiles/", proxied(nsMap, func(o *CachedOptions) {
 			o.key = func(c *Ctx) string {
@@ -188,7 +188,7 @@ func buildSites(d SiteDeps) *Sites {
 	blueNoCache := newStaticRules(append([][2]string{{"cache-control", "no-cache"}}, blueMapHeaders...)...)
 	blueStatic := newStaticRules(append([][2]string{{"cache-control", "public, max-age=86400, stale-if-error=604800"}, {"cdn-cache-control", "max-age=60"}}, blueMapHeaders...)...)
 
-	// toro-main の再起動中は、BlueMap が DB に書いた最後の版を返す (toro-map-web 経由)。ここは Cloudflare にもためさせない
+	// toro-main の再起動中は、BlueMap が DB に書いた最後の版を返す (toro-webmap 経由)。ここは Cloudflare にもためさせない
 	liveFallback := proxied(nsBlueFallback, func(o *CachedOptions) {
 		o.fixedTtl, o.swr, o.errorTtl, o.log = sec, sec, min, false
 		o.response = ResponseRules{hide: []string{"access-control-allow-origin"}, cacheControl: "no-cache", set: blueMapHeaders}
@@ -208,7 +208,7 @@ func buildSites(d SiteDeps) *Sites {
 		tier:    tierFast,
 	})
 
-	// マーカー。toro-map-web が BlueMap のマーカーに Dynmap の地点 (一覧にだけ出す) を足して返す
+	// マーカー。toro-webmap が BlueMap のマーカーに Dynmap の地点 (一覧にだけ出す) を足して返す
 	markers := proxied(nsBlue, func(o *CachedOptions) {
 		o.fixedTtl, o.swr, o.errorTtl, o.log = sec, sec, min, false
 		o.response = ResponseRules{hide: []string{"access-control-allow-origin"}, cacheControl: "no-cache", set: blueMapHeaders}
@@ -251,7 +251,7 @@ func buildSites(d SiteDeps) *Sites {
 
 	blueRules := []Rule{
 		deny,
-		// /maps/<地図>/live/ はライブ情報 (markers.json は map-web、sse は流す、players.json は BlueMap 本体)。それ以外は地図のデータ。
+		// /maps/<地図>/live/ はライブ情報 (markers.json は toro-webmap、sse は流す、players.json は BlueMap 本体)。それ以外は地図のデータ。
 		// ライブ情報はためきれないものが toro-main に届くので、知らない地図や知らない名前は聞きに行かない
 		prefixRule("/maps/", func(c *Ctx) {
 			if id, rest, ok := mapsLive(c.path); ok {
@@ -273,7 +273,7 @@ func buildSites(d SiteDeps) *Sites {
 			}
 			mapData(c)
 		}),
-		// 画面は toro-map-web (map-web/app/bluemap/、BlueMap の webapp を Nuxt と TypeScript にしたもの) が返す
+		// 画面は toro-webmap (TORO-WebMap の app/bluemap/、BlueMap の webapp を Nuxt と TypeScript にしたもの) が返す
 		exactRule("/", proxied(nsBlue, func(o *CachedOptions) {
 			o.fixedTtl, o.swr = 10*sec, min
 			o.response = ResponseRules{cacheControl: "no-cache", set: append(append([][2]string{}, blueMapHeaders...), [2]string{"content-language", "ja"})}
@@ -297,8 +297,8 @@ func buildSites(d SiteDeps) *Sites {
 		}, staticHandler(d.blueMapStatic, blueNoCache, staticOptions{})),
 		exactRule("/settings.json", staticHandler(d.blueMapStatic, blueNoCache, staticOptions{transform: transformSettings})),
 		exactRule("/toro-refresh.js", func(c *Ctx) { c.cache = "HIT"; sendEntity(c, toroRefreshEntity) }),
-		// MarumaSign の看板の、転送の行き先を調べるものと CORS のないサイトの中継 (toro-map-web は看板データにある URL とそこからたどれるものだけを読む)。
-		// 動画や生放送をそのまま流すので、ためずに渡す。安全のための頭書き (CSP の sandbox など) は toro-map-web が付ける
+		// MarumaSign の看板の、転送の行き先を調べるものと CORS のないサイトの中継 (toro-webmap は看板データにある URL とそこからたどれるものだけを読む)。
+		// 動画や生放送をそのまま流すので、ためずに渡す。安全のための頭書き (CSP の sandbox など) は toro-webmap が付ける
 		prefixRule("/_marumasign/", streamHandler(StreamOptions{
 			upstream:      d.mapWeb,
 			path:          func(c *Ctx) (string, string) { return c.path, strings.TrimPrefix(c.search, "?") },
@@ -315,7 +315,7 @@ func buildSites(d SiteDeps) *Sites {
 			o.maxTtl, o.negativeTtl, o.tier = day, 5*sec, tierBest
 			o.response = ResponseRules{set: blueMapHeaders}
 		})),
-		// 構造物の看板のブロックの形とテクスチャ (toro-map-web がクライアントの jar から作る)。Cache-Control のとおりためる
+		// 構造物の看板のブロックの形とテクスチャ (toro-webmap がクライアントの jar から作る)。Cache-Control のとおりためる
 		prefixRule("/mcassets/", proxied(nsBlue, func(o *CachedOptions) {
 			o.maxTtl, o.negativeTtl, o.tier = day, 5*sec, tierBest
 			o.response = ResponseRules{set: blueMapHeaders}
@@ -324,7 +324,7 @@ func buildSites(d SiteDeps) *Sites {
 	}
 
 	// ───────────── assets.torosaba.net (MarumaSign Companion がホストした看板の画像など)
-	// 読めるかどうかは toro-map-web が毎回確かめる (遊んでいる人の IP か、地図のページから) ので、ここではためない
+	// 読めるかどうかは toro-webmap が毎回確かめる (遊んでいる人の IP か、地図のページから) ので、ここではためない
 	assetRules := []Rule{
 		fnRule(assetFile, streamHandler(StreamOptions{
 			upstream: d.mapWeb,

@@ -5,7 +5,7 @@ Go 製。標準ライブラリと brotli のライブラリだけで、イメー
 
 ```
 ブラウザ → Cloudflare → cloudflared ─→ toro-edge:80 ─┬─ ファイルをメモリから返す (Dynmap の web/、BlueMap の web/)
-                                                       ├─ toro-map-web:3000 (Nuxt。TiDB の地図のデータ、画面) ← メモリにためる
+                                                       ├─ toro-webmap:3000 (Nuxt。TiDB の地図のデータ、画面) ← メモリにためる
                                                        └─ toro-main:8100 (BlueMap のライブ情報、SSE)
 ```
 
@@ -37,7 +37,7 @@ docker pull ghcr.io/toro-server/toro-edge:1.0.0
       - "./main/plugins/dynmap/web:/srv/dynmap-web:ro"
       - "./main/bluemap/web:/srv/bluemap-web:ro"
     environment:
-      - EDGE_MAPWEB=toro-map-web:3000
+      - EDGE_MAPWEB=toro-webmap:3000
       - EDGE_BLUEMAP_LIVE=toro-main:8100
       - EDGE_CACHE_MB=2048
     healthcheck:
@@ -58,7 +58,7 @@ docker pull ghcr.io/toro-server/toro-edge:1.0.0
 | `EDGE_PORT` | 80 | 公開のポート |
 | `EDGE_ADMIN_PORT` | 8081 | 管理用のポート (`/healthz` `/stats` `POST /purge`)。コンテナの中の 127.0.0.1 だけで聞く (ほかのコンテナからは届かない)。Tunnel には出さない |
 | `EDGE_ADMIN_TOKEN` | なし | 付けると、`/healthz` 以外と `/debug/pprof/` に `Authorization: Bearer <値>` か `X-Admin-Token: <値>` を求める |
-| `EDGE_MAPWEB` | `toro-map-web:3000` | toro-map-web (Nuxt) |
+| `EDGE_MAPWEB` | `toro-webmap:3000` | toro-webmap (Nuxt) |
 | `EDGE_BLUEMAP_LIVE` | `toro-main:8100` | BlueMap 内蔵の Web サーバー (ライブ情報、SSE) |
 | `EDGE_DYNMAP_WEB` / `EDGE_BLUEMAP_WEB` | `/srv/dynmap-web` / `/srv/bluemap-web` | ファイルのまま返すフォルダ (読むだけ) |
 | `EDGE_HOST_MAP` / `EDGE_HOST_BLUEMAP` / `EDGE_HOST_ASSETS` | 3 つの名前 | サイトごとの Host (カンマ区切りで複数) |
@@ -80,7 +80,7 @@ docker run --rm --network container:toro-edge curlimages/curl -fsS -X POST http:
 
 サイトごとの location は `sites.go` にあります (`first` → 完全一致 → 上から順の最初)。
 
-- `proxied(...)`: toro-map-web の返事をためる。`fixedTtl` (元の Cache-Control を無視する長さ)、`defaultTtl` / `maxTtl` (元の max-age に従う)、`swr` (古いまま返してよい長さ)、`errorTtl` (元が壊れているとき古いまま返してよい長さ)、`response` (頭書きの付け替え)
+- `proxied(...)`: toro-webmap の返事をためる。`fixedTtl` (元の Cache-Control を無視する長さ)、`defaultTtl` / `maxTtl` (元の max-age に従う)、`swr` (古いまま返してよい長さ)、`errorTtl` (元が壊れているとき古いまま返してよい長さ)、`response` (頭書きの付け替え)
 - `staticHandler(...)`: フォルダのファイル。`transform` で書き換える
 - `streamHandler(...)`: ためずに流す (`/_marumasign/`、assets、BlueMap の SSE)
 - `.php`、`/.` を含むパスは、ファイルがあっても 404。`..` を含むパスと、ルートの外へ出るシンボリックリンクも返さない。エンコードしたドット、スラッシュ、バックスラッシュ、NUL (`%2e` `%2f` `%5c` `%00`) を含むパスも 404

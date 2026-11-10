@@ -18,7 +18,7 @@ type Config struct {
 	Port int
 	// 管理用 (/healthz, /stats, POST /purge)。コンテナの中の 127.0.0.1 からだけ。Tunnel には出さない
 	AdminPort int
-	// toro-map-web (Nuxt)
+	// toro-webmap (Nuxt)
 	MapWeb Endpoint
 	// BlueMap 内蔵の Web サーバー (ライブ情報)
 	BlueMapLive Endpoint
@@ -106,7 +106,7 @@ func loadConfig(env map[string]string) Config {
 	return Config{
 		Port:            envInt(env, "EDGE_PORT", 80),
 		AdminPort:       envInt(env, "EDGE_ADMIN_PORT", 8081),
-		MapWeb:          endpoint(envOr(env, "EDGE_MAPWEB", "toro-map-web:3000"), 3000),
+		MapWeb:          endpoint(envOr(env, "EDGE_MAPWEB", "toro-webmap:3000"), 3000),
 		BlueMapLive:     endpoint(envOr(env, "EDGE_BLUEMAP_LIVE", "toro-main:8100"), 8100),
 		DynmapWeb:       envOr(env, "EDGE_DYNMAP_WEB", "/srv/dynmap-web"),
 		BlueMapWeb:      envOr(env, "EDGE_BLUEMAP_WEB", "/srv/bluemap-web"),

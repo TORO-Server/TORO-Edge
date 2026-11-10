@@ -259,7 +259,7 @@ func upWorld(path string) (string, bool) {
 	return r[:i], true
 }
 
-// tileQuery は /tiles/ のクエリのうち、map-web が見る timestamp=<数字> だけを取り出す (なければ "")
+// tileQuery は /tiles/ のクエリのうち、toro-webmap が見る timestamp=<数字> だけを取り出す (なければ "")
 func tileQuery(search string) string {
 	if search == "" {
 		return ""

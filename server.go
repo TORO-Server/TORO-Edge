@@ -37,7 +37,7 @@ func startEdge(cfg Config, out io.Writer) (*Edge, error) {
 	e := &Edge{
 		cfg:    cfg,
 		cache:  newEntityCache(cfg.CacheBytes),
-		mapWeb: newUpstream("map-web", cfg.MapWeb, 256, 3*time.Second),
+		mapWeb: newUpstream("toro-webmap", cfg.MapWeb, 256, 3*time.Second),
 		live:   newUpstream("bluemap-live", cfg.BlueMapLive, 32, 2*time.Second),
 		out:    out,
 		log:    newAccessLog(out, cfg.AccessLog),

@@ -103,7 +103,7 @@ func (u *Upstream) close() {
 
 // baseUpstreamHeaders は元に渡す頭書き。客の頭書きは、ここに書いたものだけを渡す
 // (X-Toro-Client-IP のような内側の頭書きを、客に書かせない)。
-// Host は客のもの (map-web の fromMapPage が Origin と比べる)。圧縮は元に頼まず、ここで 1 度だけ行う
+// Host は客のもの (toro-webmap の fromMapPage が Origin と比べる)。圧縮は元に頼まず、ここで 1 度だけ行う
 func baseUpstreamHeaders(r *Request) map[string]string {
 	out := map[string]string{
 		"host":            r.Host,
