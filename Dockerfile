@@ -7,7 +7,7 @@
 # (QEMU の中でコンパイルしない。速く、結果も同じ)
 
 # Go は修正版に固定する (go.mod の go と toolchain と同じ版。Dependabot がダイジェストごと更新する)
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS compile
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS compile
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
