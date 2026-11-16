@@ -86,7 +86,7 @@ docker run --rm --network container:toro-edge curlimages/curl -fsS -X POST http:
 - `.php`、`/.` を含むパスは、ファイルがあっても 404。`..` を含むパスと、ルートの外へ出るシンボリックリンクも返さない。エンコードしたドット、スラッシュ、バックスラッシュ、NUL (`%2e` `%2f` `%5c` `%00`) を含むパスも 404
 - `proxied(...)` の鍵と元に聞く URL はパスだけ。クエリを見るのは `/tiles/` の `timestamp` と `/mcassets/skin` の `name` と `uuid` だけ
 - `/up/world/<ワールド>/<数字>` のほかは 404。元には `/up/world/<ワールド>/0` で聞く
-- api ホスト (`api.torosaba.net`) は `/map/v1/` の `configuration` `world/<ワールド>/<数字>` `tiles/` `ws` だけ (map ホストの `/up/` `/tiles/` と同じ決まりで、元には `/map/v1/` の頭を削らずに聞く)。`Access-Control-Allow-Origin` は元のものをそのまま返す。ほかのパスは 404 (Tunnel が `/map/*` だけをここへ渡す。docs は TORO-WebMap の `docs/map-deployment.md`)
+- api ホスト (`api.torosaba.net`) は `/map/v1/` の `configuration` `world/<ワールド>/<数字>` `tiles/` `ws` だけ (map ホストの `/up/` `/tiles/` と同じ決まりで、元には `/map/v1/` の頭を削らずに聞く)。`Access-Control-Allow-Origin` は元のものをそのまま返す。ほかのパスは 404 (ここへ渡す Tunnel の公開ルールは、TORO-WebMap の `docs/map-deployment.md` が正本)
 - `/maps/<地図>/live/` は `players.json` `markers.json` `sse` だけで、地図は BlueMap の `settings.json` の `maps` にあるものだけ (読めないときは止めない)
 
 ### 挙動
