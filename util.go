@@ -241,23 +241,27 @@ func isDigits(s string) bool {
 	return true
 }
 
-// upWorld は /up/world/<ワールド>/<時刻> のワールドを取り出す。時刻は数字だけ (ブラウザは失敗すると 1 を引くので、負も受ける)
-func upWorld(path string) (string, bool) {
-	const pre = "/up/world/"
-	if !strings.HasPrefix(path, pre) {
-		return "", false
+// worldUpdate は <pre><ワールド>/<時刻> のワールドを取り出す決まりを作る。時刻は数字だけ (ブラウザは失敗すると 1 を引くので、負も受ける)
+func worldUpdate(pre string) func(string) (string, bool) {
+	return func(path string) (string, bool) {
+		if !strings.HasPrefix(path, pre) {
+			return "", false
+		}
+		r := path[len(pre):]
+		i := strings.IndexByte(r, '/')
+		if i <= 0 {
+			return "", false
+		}
+		ts := strings.TrimPrefix(r[i+1:], "-")
+		if len(ts) > 20 || !isDigits(ts) {
+			return "", false
+		}
+		return r[:i], true
 	}
-	r := path[len(pre):]
-	i := strings.IndexByte(r, '/')
-	if i <= 0 {
-		return "", false
-	}
-	ts := strings.TrimPrefix(r[i+1:], "-")
-	if len(ts) > 20 || !isDigits(ts) {
-		return "", false
-	}
-	return r[:i], true
 }
+
+// upWorld は /up/world/<ワールド>/<時刻> のワールド
+var upWorld = worldUpdate("/up/world/")
 
 // tileQuery は /tiles/ のクエリのうち、toro-webmap が見る timestamp=<数字> だけを取り出す (なければ "")
 func tileQuery(search string) string {

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -57,6 +58,14 @@ var (
 
 // 前の画面のときだけ、1 度だけ読み直す (読み直すとブラウザはページを確かめ直し、今の画面が届く)
 const toroRefresh = "(function(){if(document.getElementById('__nuxt'))return;try{if(sessionStorage.getItem('toro-refresh'))return;sessionStorage.setItem('toro-refresh','1')}catch(e){return}location.reload()})();\n"
+
+// dynmapPaths は Dynmap の API の、サイトごとのパス (config は完全一致、world と tiles は前の部分)
+type dynmapPaths struct{ config, world, tiles string }
+
+// upgradeRequired は WebSocket でない GET への返事 (WebSocket そのものは、サーバーが Upgrade を見て渡す)
+func upgradeRequired(c *Ctx) {
+	sendText(c, http.StatusUpgradeRequired, "Upgrade Required\n", "Upgrade", "websocket")
+}
 
 // SiteDeps は経路の決まりを作るのに使うもの
 type SiteDeps struct {
@@ -119,11 +128,40 @@ func buildSites(d SiteDeps) *Sites {
 		c.write(301, b, c.debugLine(), nil)
 	}
 
+	// ───────────── Dynmap の API (設定、ワールドの更新、タイル)。map.torosaba.net の /up/ と /tiles/、api.torosaba.net の /map/v1/ で、パスの頭だけが違う。
+	// どちらも元 (toro-webmap) へ、客が来たパスのまま聞く (頭を削らない)。toro-webmap が付ける Access-Control-Allow-Origin は、そのまま返す
+	dynmapAPI := func(ns *nsCache, p dynmapPaths) []Rule {
+		return []Rule{
+			// 設定とワールドの更新。全員が 2 秒ごとに読むので、ワールドごとに 1 秒だけまとめる (中身は時刻によらず同じ)
+			exactRule(p.config, proxied(ns, func(o *CachedOptions) {
+				o.key = func(*Ctx) string { return "config" }
+				o.fixedTtl, o.swr = 5*sec, 5*sec
+			})),
+			// 元に聞く URL も鍵から作る (先頭の客の時刻やクエリを、ワールドで 1 つの返事に持ち込まない)。時刻は見ないので 0
+			fnRule(worldUpdate(p.world), proxied(ns, func(o *CachedOptions) {
+				o.key = func(c *Ctx) string { return "update:" + c.cap }
+				o.path = func(c *Ctx) (string, string) { return p.world + c.cap + "/0", "" }
+				o.fixedTtl, o.swr, o.negativeTtl = sec, 2*sec, 2*sec
+			})),
+			// 地図のタイル、マーカー、プレイヤーの顔。キャッシュの長さは toro-webmap の Cache-Control に従う (なければ 5 分)
+			// 描き直したタイルは ?timestamp= で別の URL になる (クエリはこれだけを見る)
+			prefixRule(p.tiles, proxied(ns, func(o *CachedOptions) {
+				o.key = func(c *Ctx) string {
+					if q := tileQuery(c.search); q != "" {
+						return c.path + "?" + q
+					}
+					return c.path
+				}
+				o.path = func(c *Ctx) (string, string) { return c.path, tileQuery(c.search) }
+				o.defaultTtl, o.maxTtl, o.swr, o.negativeTtl, o.log = 5*min, day, 30*sec, 2*sec, false
+			})),
+		}
+	}
 	// ───────────── map.torosaba.net (Dynmap)
 	mapNoCache := newStaticRules([2]string{"cache-control", "no-cache"})
 	mapStatic := newStaticRules([2]string{"cache-control", "public, max-age=86400"})
 
-	mapRules := []Rule{
+	mapRules := slices.Concat([]Rule{
 		deny,
 		// 地図の画面は toro-webmap (TORO-WebMap の app/、Nuxt) が返す
 		exactRule("/", proxied(nsMap, func(o *CachedOptions) {
@@ -153,36 +191,14 @@ func buildSites(d SiteDeps) *Sites {
 		})),
 		// JsonFileClientUpdateComponent が書き出す
 		exactRule("/standalone/config.js", staticHandler(d.dynmapStatic, mapNoCache, staticOptions{})),
-		// 設定とワールドの更新。全員が 2 秒ごとに読むので、ワールドごとに 1 秒だけまとめる (中身は時刻によらず同じ)
-		exactRule("/up/configuration", proxied(nsMap, func(o *CachedOptions) {
-			o.key = func(*Ctx) string { return "config" }
-			o.fixedTtl, o.swr = 5*sec, 5*sec
-		})),
-		// 元に聞く URL も鍵から作る (先頭の客の時刻やクエリを、ワールドで 1 つの返事に持ち込まない)。時刻は見ないので 0
-		fnRule(upWorld, proxied(nsMap, func(o *CachedOptions) {
-			o.key = func(c *Ctx) string { return "update:" + c.cap }
-			o.path = func(c *Ctx) (string, string) { return "/up/world/" + c.cap + "/0", "" }
-			o.fixedTtl, o.swr, o.negativeTtl = sec, 2*sec, 2*sec
-		})),
+	}, dynmapAPI(nsMap, dynmapPaths{config: "/up/configuration", world: "/up/world/", tiles: "/tiles/"}), []Rule{
 		// 更新とプレイヤーの位置を届ける WebSocket (サーバーが Upgrade を見て渡す。つながらないときは、ブラウザが上の 2 つを取りに来る)
-		exactRule("/up/ws", func(c *Ctx) { sendText(c, http.StatusUpgradeRequired, "Upgrade Required\n", "Upgrade", "websocket") }),
+		exactRule("/up/ws", upgradeRequired),
 		// Web チャットやログインは使っていない
 		prefixRule("/up/", notFound),
-		// 地図のタイル、マーカー、プレイヤーの顔。キャッシュの長さは toro-webmap の Cache-Control に従う (なければ 5 分)
-		// 描き直したタイルは ?timestamp= で別の URL になる (クエリはこれだけを見る)
-		prefixRule("/tiles/", proxied(nsMap, func(o *CachedOptions) {
-			o.key = func(c *Ctx) string {
-				if q := tileQuery(c.search); q != "" {
-					return c.path + "?" + q
-				}
-				return c.path
-			}
-			o.path = func(c *Ctx) (string, string) { return c.path, tileQuery(c.search) }
-			o.defaultTtl, o.maxTtl, o.swr, o.negativeTtl, o.log = 5*min, day, 30*sec, 2*sec, false
-		})),
 		// js や css は index.html が ?_=<版> を付けて読む
 		prefixRule("/", staticHandler(d.dynmapStatic, mapStatic, staticOptions{})),
-	}
+	})
 
 	// ───────────── 3d-map.torosaba.net (BlueMap)
 	blueNoCache := newStaticRules(append([][2]string{{"cache-control", "no-cache"}}, blueMapHeaders...)...)
@@ -345,9 +361,17 @@ func buildSites(d SiteDeps) *Sites {
 		prefixRule("/", notFound),
 	}
 
-	mapSite := &Site{name: "map", route: compileRules(mapRules)}
-	blueSite := &Site{name: "bluemap", route: compileRules(blueRules)}
+	// ───────────── api.torosaba.net の /map/v1/ (Dynmap の API。ブラウザは map.torosaba.net の画面から、別のオリジンとして読む)
+	// Tunnel が /map/* だけをここへ渡す (それ以外のパスは toro-api へ行き、ここには来ない)。来たら 404。
+	// BlueMap の決まりのように access-control-allow-origin を外さない (外すと、別オリジンの画面が読めない)
+	apiRules := slices.Concat([]Rule{deny}, dynmapAPI(d.cache.space(), dynmapPaths{config: "/map/v1/configuration", world: "/map/v1/world/", tiles: "/map/v1/tiles/"}), []Rule{
+		exactRule("/map/v1/ws", upgradeRequired),
+		prefixRule("/", notFound),
+	})
+	mapSite := &Site{name: "map", wsPath: "/up/ws", route: compileRules(mapRules)}
+	blueSite := &Site{name: "bluemap", wsPath: "/up/ws", route: compileRules(blueRules)}
 	assetSite := &Site{name: "assets", route: compileRules(assetRules)}
+	apiSite := &Site{name: "api", wsPath: "/map/v1/ws", route: compileRules(apiRules)}
 
 	byHost := map[string]*Site{}
 	for _, h := range cfg.HostsMap {
@@ -358,6 +382,9 @@ func buildSites(d SiteDeps) *Sites {
 	}
 	for _, h := range cfg.HostsAssets {
 		byHost[h] = assetSite
+	}
+	for _, h := range cfg.HostsApi {
+		byHost[h] = apiSite
 	}
 
 	return &Sites{
