@@ -508,6 +508,12 @@ func (e *env) assets(path string, o ...reqOpts) *reply {
 	return e.req(e.edge.port, "assets.torosaba.net", path, o)
 }
 
+// api は api.torosaba.net (Dynmap の API の /map/v1/) へ
+func (e *env) api(path string, o ...reqOpts) *reply {
+	e.t.Helper()
+	return e.req(e.edge.port, "api.torosaba.net", path, o)
+}
+
 func (e *env) admin(path string, method string) *reply {
 	e.t.Helper()
 	r, err := request(e.edge.adminPort, path, reqOpts{method: method})

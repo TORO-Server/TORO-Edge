@@ -1169,3 +1169,88 @@ func TestAdminPort(t *testing.T) {
 		eq(t, e.get("/stats").status, 404)
 	})
 }
+
+func TestApiHost(t *testing.T) {
+	// api.torosaba.net は /map/v1/ だけ。元 (toro-webmap) へ頭を削らずに聞き、元の Access-Control-Allow-Origin を返す。ほかのパスは 404
+	withEnv(t, none(), func(e *env) {
+		e.mapweb.setHandler(func(w http.ResponseWriter, r *http.Request) {
+			sendText(w, 200, hdr("content-type", "application/json", "access-control-allow-origin", "*", "cache-control", "public, max-age=30"), `{"ok":true}`)
+		})
+		// 設定: 頭を削らない / ACAO をそのまま / クエリは渡さない
+		r := e.api("/map/v1/configuration?x=1")
+		eq(t, r.status, 200)
+		eq(t, r.h("Access-Control-Allow-Origin"), "*")
+		eq(t, string(r.body), `{"ok":true}`)
+		eq(t, e.mapweb.seenAt(0).URL, "/map/v1/configuration")
+		// ワールドの更新: 時刻は見ないので 0
+		eq(t, e.api("/map/v1/world/main/5?x=1&y=2").status, 200)
+		eq(t, e.mapweb.seenAt(1).URL, "/map/v1/world/main/0")
+		for _, bad := range []string{"/map/v1/world/main", "/map/v1/world/main/x", "/map/v1/world//1"} {
+			eq(t, e.api(bad).status, 404, bad)
+		}
+		// タイル: クエリは timestamp だけを元へ渡す
+		tile := e.api("/map/v1/tiles/main/flat/0_0/0_0.png?timestamp=5&x=1")
+		eq(t, tile.status, 200)
+		eq(t, tile.h("Access-Control-Allow-Origin"), "*")
+		eq(t, e.mapweb.seenAt(2).URL, "/map/v1/tiles/main/flat/0_0/0_0.png?timestamp=5")
+		eq(t, e.api("/map/v1/tiles/_markers_/marker_main.json").status, 200)
+		eq(t, e.api("/map/v1/tiles/faces/16x16/x.png").status, 200)
+
+		// /map/v1/ の外は、元に聞かずに 404 (toro-api のものは Tunnel が先に振り分けるので、ここには来ない)
+		seen := e.mapweb.seenLen()
+		for _, p := range []string{"/", "/server/status", "/docs/list", "/up/configuration", "/tiles/main/x", "/map/v1", "/map/v1/other", "/live/clients", "/images/blank.png", "/x.php"} {
+			eq(t, e.api(p).status, 404, p)
+		}
+		eq(t, e.mapweb.seenLen(), seen)
+
+		// map.torosaba.net は今までどおり: /up/ は元へ、/map/v1/ は持たない
+		eq(t, e.get("/up/configuration").status, 200)
+		eq(t, e.mapweb.seenAt(seen).URL, "/up/configuration")
+		eq(t, e.get("/map/v1/configuration").status, 404)
+		eq(t, e.blue("/map/v1/configuration").status, 404)
+		eq(t, e.mapweb.seenLen(), seen+1)
+	})
+}
+
+func TestApiHostWebSocket(t *testing.T) {
+	// api.torosaba.net の /map/v1/ws だけ Upgrade を渡す。元には頭を削らずに聞く
+	withEnv(t, none(), func(e *env) {
+		e.mapweb.setHandler(e.mapweb.echoUpgrade)
+		conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(e.edge.port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(10 * time.Second))
+		fmt.Fprintf(conn, "GET /map/v1/ws HTTP/1.1\r\nHost: api.torosaba.net\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: https://map.torosaba.net\r\n\r\n")
+		br := bufio.NewReader(conn)
+		res, err := http.ReadResponse(br, &http.Request{Method: "GET"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		eq(t, res.StatusCode, 101)
+		msg := "hello through the api host"
+		conn.Write([]byte(msg))
+		echoed := make([]byte, len(msg))
+		if _, err := io.ReadFull(br, echoed); err != nil {
+			t.Fatal(err)
+		}
+		eq(t, string(echoed), msg)
+		conn.Close()
+		seen := e.mapweb.seenAt(0)
+		eq(t, seen.URL, "/map/v1/ws")
+		eq(t, seen.Header.Get("Origin"), "https://map.torosaba.net")
+		eq(t, seen.Header.Get("Host"), "api.torosaba.net")
+
+		// 断るもの: api の /map/v1/ws 以外、map の /map/v1/ws、api の /up/ws
+		for _, c := range [][2]string{{"/map/v1/other", "api.torosaba.net"}, {"/up/ws", "api.torosaba.net"}, {"/server/status", "api.torosaba.net"}, {"/map/v1/ws", "map.torosaba.net"}, {"/map/v1/ws", "3d-map.torosaba.net"}, {"/map/v1/ws", "assets.torosaba.net"}} {
+			r, err := request(e.edge.port, c[0], reqOpts{host: c[1], headers: hdr("connection", "Upgrade", "upgrade", "websocket")})
+			if err != nil {
+				t.Fatalf("%s%s: %v", c[1], c[0], err)
+			}
+			eq(t, r.status, 404, c[1]+c[0])
+		}
+		// WebSocket でない GET は 426
+		eq(t, e.api("/map/v1/ws").status, 426)
+	})
+}

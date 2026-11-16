@@ -106,8 +106,10 @@ type Handler func(c *Ctx)
 
 // Site は Host ごとの経路の決まり
 type Site struct {
-	name  string
-	route func(path string, c *Ctx) Handler
+	name string
+	// WebSocket (Upgrade) を元に渡すパス。空ならこのサイトは WebSocket を受けない
+	wsPath string
+	route  func(path string, c *Ctx) Handler
 }
 
 // Rule は経路の 1 つ。exact / prefix / fn のどれか 1 つを使う。fn は合えば、取り出した部分 (なければ "") と true を返す
