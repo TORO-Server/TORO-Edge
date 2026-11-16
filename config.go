@@ -28,6 +28,8 @@ type Config struct {
 	HostsMap     []string
 	HostsBlueMap []string
 	HostsAssets  []string
+	// api.torosaba.net の /map/v1/ (Dynmap の API。ほかのパスは Tunnel が toro-api へ渡すので、ここには来ない)
+	HostsApi []string
 	// 地図のデータをためる上限 (バイト)
 	CacheBytes int64
 	// これより大きい返事はためずに流す (バイト)
@@ -113,6 +115,7 @@ func loadConfig(env map[string]string) Config {
 		HostsMap:        hostList(env["EDGE_HOST_MAP"], "map.torosaba.net"),
 		HostsBlueMap:    hostList(env["EDGE_HOST_BLUEMAP"], "3d-map.torosaba.net"),
 		HostsAssets:     hostList(env["EDGE_HOST_ASSETS"], "assets.torosaba.net"),
+		HostsApi:        hostList(env["EDGE_HOST_API"], "api.torosaba.net"),
 		CacheBytes:      cacheBytes,
 		MaxEntityBytes:  maxEntity,
 		AccessLog:       env["EDGE_ACCESS_LOG"] != "0",

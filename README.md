@@ -61,7 +61,7 @@ docker pull ghcr.io/toro-server/toro-edge:1.0.0
 | `EDGE_MAPWEB` | `toro-webmap:3000` | toro-webmap (Nuxt) |
 | `EDGE_BLUEMAP_LIVE` | `toro-main:8100` | BlueMap 内蔵の Web サーバー (ライブ情報、SSE) |
 | `EDGE_DYNMAP_WEB` / `EDGE_BLUEMAP_WEB` | `/srv/dynmap-web` / `/srv/bluemap-web` | ファイルのまま返すフォルダ (読むだけ) |
-| `EDGE_HOST_MAP` / `EDGE_HOST_BLUEMAP` / `EDGE_HOST_ASSETS` | 3 つの名前 | サイトごとの Host (カンマ区切りで複数) |
+| `EDGE_HOST_MAP` / `EDGE_HOST_BLUEMAP` / `EDGE_HOST_ASSETS` / `EDGE_HOST_API` | 4 つの名前 | サイトごとの Host (カンマ区切りで複数)。既定は map. / 3d-map. / assets. / api.torosaba.net |
 | `EDGE_CACHE_MB` | 2048 | 地図のデータをためる上限 (MiB)。1 つの返事が 1/8 (最大 32 MiB) を超えたら、ためずに流す |
 | `EDGE_ACCESS_LOG` | 1 | `0` でアクセスログを出さない |
 | `EDGE_DEBUG_HEADERS` | 0 | `1` で返事に `x-edge-cache` を付ける (試験用) |
@@ -86,6 +86,7 @@ docker run --rm --network container:toro-edge curlimages/curl -fsS -X POST http:
 - `.php`、`/.` を含むパスは、ファイルがあっても 404。`..` を含むパスと、ルートの外へ出るシンボリックリンクも返さない。エンコードしたドット、スラッシュ、バックスラッシュ、NUL (`%2e` `%2f` `%5c` `%00`) を含むパスも 404
 - `proxied(...)` の鍵と元に聞く URL はパスだけ。クエリを見るのは `/tiles/` の `timestamp` と `/mcassets/skin` の `name` と `uuid` だけ
 - `/up/world/<ワールド>/<数字>` のほかは 404。元には `/up/world/<ワールド>/0` で聞く
+- api ホスト (`api.torosaba.net`) は `/map/v1/` の `configuration` `world/<ワールド>/<数字>` `tiles/` `ws` だけ (map ホストの `/up/` `/tiles/` と同じ決まりで、元には `/map/v1/` の頭を削らずに聞く)。`Access-Control-Allow-Origin` は元のものをそのまま返す。ほかのパスは 404 (Tunnel が `/map/*` だけをここへ渡す。docs は TORO-WebMap の `docs/map-deployment.md`)
 - `/maps/<地図>/live/` は `players.json` `markers.json` `sse` だけで、地図は BlueMap の `settings.json` の `maps` にあるものだけ (読めないときは止めない)
 
 ### 挙動
@@ -95,7 +96,7 @@ docker run --rm --network container:toro-edge curlimages/curl -fsS -X POST http:
 - ためた量には、鍵の長さと、捨てたが送っている最中でまだ閉じていないファイルも数える。1 KiB を超える鍵はためずに流す。もう返さないものは裏で少しずつ捨てる。404 を古いものとして返すのは 1 分まで
 - 圧縮は段ごとに待ち行列の上限 (256 個、128 MiB) があり、いっぱいなら、そのままの版を返す。待っているあいだに捨てられたものは作らない。fast の段も 2 秒までしか待たない
 - BlueMap のライブ情報は 1 秒まとめる (toro-main に毎秒 1 回)
-- WebSocket (`/up/ws`) と SSE (`live/sse`) は、解かずにそのまま流す
+- WebSocket (map / 3d-map は `/up/ws`、api は `/map/v1/ws`) と SSE (`live/sse`) は、解かずにそのまま流す
 - 流すもの (SSE、動画、大きくてためられないもの) は、ためるための接続と別の口で元につなぐ。遅い客や終わらない返事で、ためる経路を待たせない
 - 1 つの客 (`CF-Connecting-IP`。IPv6 は /64 ごと) が同時に使える数には上限がある (流すもの 64、SSE 8、WebSocket 16)。超えたら 429。Cloudflare を通っていないもの (Docker の中) は数えない
 - 元に渡す頭書きは決めたものだけ。`X-Toro-Client-IP` を客が書いても渡さない (assets は Cloudflare の IP から作る)

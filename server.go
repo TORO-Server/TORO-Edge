@@ -117,12 +117,12 @@ func (e *Edge) handle(c *Ctx) {
 		}
 	}()
 	if req.upgrade {
-		// WebSocket (map.torosaba.net と 3d-map.torosaba.net の /up/ws だけ): つないだあとは何も解かずにそのまま渡す
-		if e.srv.closing.Load() || (site.name != "map" && site.name != "bluemap") || c.path != "/up/ws" {
+		// WebSocket (サイトごとに決めた 1 つのパスだけ: map と 3d-map は /up/ws、api は /map/v1/ws): つないだあとは何も解かずにそのまま渡す
+		if e.srv.closing.Load() || site.wsPath == "" || c.path != site.wsPath {
 			notFound(c)
 			return
 		}
-		proxyUpgrade(c, e.cfg.MapWeb, "/up/ws"+c.search)
+		proxyUpgrade(c, e.cfg.MapWeb, site.wsPath+c.search)
 		return
 	}
 	if c.method != "GET" && c.method != "HEAD" {
