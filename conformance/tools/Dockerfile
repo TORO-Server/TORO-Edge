@@ -1,6 +1,6 @@
 # 負荷の道具 (bench / coldpass) を、1 つのイメージにする。リポジトリの直下から:
 #
-#   docker build -f conformance/tools/Dockerfile -t toro-edge:tools .
+#   docker build -f conformance/tools/Dockerfile -t edge-tools .
 #
 # cpuprobe.sh は、これを minecraft-network の中で動かす (負荷をかける側の CPU は --cpus で絞る)
 

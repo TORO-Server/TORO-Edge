@@ -124,8 +124,8 @@ func TestStaticDynmap(t *testing.T) {
 		eq(t, png.h("Content-Type"), "image/png")
 		ok(t, !png.has("Content-Encoding"))
 		eq(t, e.get("/images/nothing.png").status, 404)
-		// Host が知らない名前でも map.torosaba.net と同じ (内側から toro-edge で呼ばれる)
-		eq(t, e.get("/css/style.css", reqOpts{host: "toro-edge"}).status, 200)
+		// Host が知らない名前でも map.torosaba.net と同じ (内側から入り口のプロキシ名で呼ばれる)
+		eq(t, e.get("/css/style.css", reqOpts{host: "edge.example.test"}).status, 200)
 		eq(t, e.mapweb.seenLen(), 0)
 	})
 }
@@ -184,7 +184,7 @@ func TestRewrites(t *testing.T) {
 		asset := e.blue("/assets/a.png")
 		eq(t, asset.h("Cache-Control"), "public, max-age=86400, stale-if-error=604800")
 		eq(t, asset.h("CDN-Cache-Control"), "max-age=60")
-		// maps/ は静的に返さない (toro-webmap に聞く)
+		// maps/ は静的に返さない (地図サーバー に聞く)
 		e.mapweb.setHandler(notFound)
 		eq(t, e.blue("/maps/hidden.json").status, 404)
 		eq(t, e.mapweb.hitCount("/maps/hidden.json"), 1)
@@ -390,7 +390,7 @@ func TestEncodedDelimitersAreRefused(t *testing.T) {
 }
 
 func TestBlueMapLiveNames(t *testing.T) {
-	// live/ は実際に使う名前と settings.json にある地図だけ。ほかは toro-main に聞かない
+	// live/ は実際に使う名前と settings.json にある地図だけ。ほかは ゲームサーバー に聞かない
 	withEnv(t, none(), func(e *env) {
 		e.live.setHandler(func(w http.ResponseWriter, _ *http.Request) {
 			sendText(w, 200, hdr("content-type", "application/json"), `{"players":[]}`)
@@ -650,7 +650,7 @@ func TestUpstreamAlreadyCompressed(t *testing.T) {
 }
 
 func TestBlueMapLive(t *testing.T) {
-	// BlueMap 本体に聞き、1 秒まとめ、頭書きを付け替える。落ちていたら DB の版 (toro-webmap) へ
+	// BlueMap 本体に聞き、1 秒まとめ、頭書きを付け替える。落ちていたら DB の版 (地図サーバー) へ
 	withEnv(t, none(), func(e *env) {
 		e.live.setHandler(func(w http.ResponseWriter, _ *http.Request) {
 			sendText(w, 200, hdr("content-type", "application/json", "cache-control", "max-age=86400", "content-security-policy", "default-src none", "x-content-type-options", "x"), `{"players":[]}`)
@@ -676,7 +676,7 @@ func TestBlueMapLive(t *testing.T) {
 		eq(t, e.mapweb.hitCount(url), 0)
 		eq(t, e.live.seenAt(0).Header.Get("Host"), "3d-map.torosaba.net")
 
-		// マーカーは toro-webmap (Dynmap の地点を足したもの)
+		// マーカーは 地図サーバー (Dynmap の地点を足したもの)
 		e.mapweb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
 			sendText(w, 200, hdr("content-type", "application/json", "cache-control", "no-cache", "access-control-allow-origin", "*"), `{"merged":true}`)
 		})
@@ -685,12 +685,12 @@ func TestBlueMapLive(t *testing.T) {
 		ok(t, !markers.has("Access-Control-Allow-Origin"))
 		eq(t, e.live.hitCount("/maps/overworld/live/markers.json"), 0)
 
-		// BlueMap 本体が落ちている (toro-main の再起動中)
+		// BlueMap 本体が落ちている (ゲームサーバー の再起動中)
 		e.live.stop()
 		e.mapweb.setHandler(func(w http.ResponseWriter, _ *http.Request) {
 			sendText(w, 200, hdr("content-type", "application/json", "cache-control", "public, max-age=3600", "access-control-allow-origin", "*"), `{"players":["last-from-db"]}`)
 		})
-		// まだためていない (古いものもない) ものは、toro-webmap が DB から返す。ためてあるものは errorTtl のあいだ古い版を返す
+		// まだためていない (古いものもない) ものは、地図サーバー が DB から返す。ためてあるものは errorTtl のあいだ古い版を返す
 		fallback := e.blue("/maps/other/live/players.json?x=1")
 		eq(t, fallback.status, 200)
 		eq(t, fallback.h("X-Edge-Cache"), "MISS")
@@ -851,7 +851,7 @@ func TestMethodsAndURL(t *testing.T) {
 		eq(t, post.h("Allow"), "GET, HEAD")
 		eq(t, e.get("/live/clients", reqOpts{method: "POST"}).status, 405)
 		eq(t, e.get("/"+strings.Repeat("a", 9000)).status, 414)
-		// 内側のための /live/ は、外から GET しても toro-webmap に届かない (map.torosaba.net 側は静的なファイルとして探して 404)
+		// 内側のための /live/ は、外から GET しても 地図サーバー に届かない (map.torosaba.net 側は静的なファイルとして探して 404)
 		eq(t, e.get("/live/plugin").status, 404)
 		eq(t, e.mapweb.seenLen(), 0)
 	})
@@ -1005,7 +1005,7 @@ func TestErrorReplies(t *testing.T) {
 		})
 		miss := e.blue("/_nuxt/old-chunk.js")
 		eq(t, miss.status, 404)
-		// BlueMap の CSP に置き換えず、toro-webmap が返したままにする
+		// BlueMap の CSP に置き換えず、地図サーバー が返したままにする
 		eq(t, miss.h("Content-Security-Policy"), "script-src 'none'")
 		// 404 は少しのあいだだけ覚える (古い画面が消えたファイルを何度も聞きに来る)
 		e.blue("/_nuxt/old-chunk.js")
@@ -1171,7 +1171,7 @@ func TestAdminPort(t *testing.T) {
 }
 
 func TestApiHost(t *testing.T) {
-	// api.torosaba.net は /map/v1/ だけ。元 (toro-webmap) へ頭を削らずに聞き、元の Access-Control-Allow-Origin を返す。ほかのパスは 404
+	// api.torosaba.net は /map/v1/ だけ。元 (地図サーバー) へ頭を削らずに聞き、元の Access-Control-Allow-Origin を返す。ほかのパスは 404
 	withEnv(t, none(), func(e *env) {
 		e.mapweb.setHandler(func(w http.ResponseWriter, r *http.Request) {
 			sendText(w, 200, hdr("content-type", "application/json", "access-control-allow-origin", "*", "cache-control", "public, max-age=30"), `{"ok":true}`)
@@ -1256,7 +1256,7 @@ func TestApiHostWebSocket(t *testing.T) {
 }
 
 func TestApiBackendEnv(t *testing.T) {
-	// EDGE_API_BACKEND を決めると、api.torosaba.net の /map/v1/ (と WebSocket) だけが別の元へ行く。map.torosaba.net と 3d-map は toro-webmap のまま
+	// EDGE_API_BACKEND を決めると、api.torosaba.net の /map/v1/ (と WebSocket) だけが別の元へ行く。map.torosaba.net と 3d-map は 地図サーバー のまま
 	withEnv(t, overrides{apiBackend: true}, func(e *env) {
 		okJSON := func(w http.ResponseWriter, _ *http.Request) {
 			sendText(w, 200, hdr("content-type", "application/json", "access-control-allow-origin", "*", "cache-control", "no-cache"), `{"ok":true}`)
@@ -1264,7 +1264,7 @@ func TestApiBackendEnv(t *testing.T) {
 		e.mapweb.setHandler(okJSON)
 		e.apiback.setHandler(okJSON)
 
-		// HTTP: 頭を削らずに新しい元へ。toro-webmap には行かない
+		// HTTP: 頭を削らずに新しい元へ。地図サーバー には行かない
 		eq(t, e.api("/map/v1/configuration").status, 200)
 		eq(t, e.api("/map/v1/world/main/5").status, 200)
 		eq(t, e.api("/map/v1/tiles/main/flat/0_0/0_0.png?timestamp=5&x=1").status, 200)
@@ -1274,12 +1274,12 @@ func TestApiBackendEnv(t *testing.T) {
 		eq(t, e.apiback.seenAt(2).URL, "/map/v1/tiles/main/flat/0_0/0_0.png?timestamp=5")
 		eq(t, e.mapweb.seenLen(), 0)
 
-		// map.torosaba.net は今までどおり toro-webmap へ
+		// map.torosaba.net は今までどおり 地図サーバー へ
 		eq(t, e.get("/up/configuration").status, 200)
 		eq(t, e.mapweb.seenLen(), 1)
 		eq(t, e.apiback.seenLen(), 3)
 
-		// WebSocket: api の /map/v1/ws は新しい元へ、map の /up/ws は toro-webmap へ
+		// WebSocket: api の /map/v1/ws は新しい元へ、map の /up/ws は 地図サーバー へ
 		e.apiback.setHandler(e.apiback.echoUpgrade)
 		e.mapweb.setHandler(e.mapweb.echoUpgrade)
 		for _, c := range []struct{ host, path string }{{"api.torosaba.net", "/map/v1/ws"}, {"map.torosaba.net", "/up/ws"}} {

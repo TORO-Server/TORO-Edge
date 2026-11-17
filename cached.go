@@ -16,7 +16,7 @@ import (
 
 var errFetchPanic = errors.New("fetch panicked")
 
-// CachedOptions は toro-webmap などの返事をメモリにためて返す決まり
+// CachedOptions は 地図サーバー などの返事をメモリにためて返す決まり
 type CachedOptions struct {
 	upstream *Upstream
 	// ためる場所 (名前の空間)

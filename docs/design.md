@@ -6,14 +6,14 @@
 
 サイトごとの location は `sites.go` にあります (`first` → 完全一致 → 上から順の最初)。
 
-- `proxied(...)`: TORO-WebMap の返事をためる。`fixedTtl` (元の Cache-Control を無視する長さ)、`defaultTtl` / `maxTtl` (元の max-age に従う)、`swr` (古いまま返してよい長さ)、`errorTtl` (元が壊れているとき古いまま返してよい長さ)、`response` (頭書きの付け替え)
+- `proxied(...)`: 地図サーバー の返事をためる。`fixedTtl` (元の Cache-Control を無視する長さ)、`defaultTtl` / `maxTtl` (元の max-age に従う)、`swr` (古いまま返してよい長さ)、`errorTtl` (元が壊れているとき古いまま返してよい長さ)、`response` (頭書きの付け替え)
 - `staticHandler(...)`: フォルダのファイル。`transform` で書き換える
 - `streamHandler(...)`: ためずに流す (`/_marumasign/`、assets、BlueMap の サーバーから送り続ける通信 (SSE))
 - `.php`、`/.` を含むパスは、ファイルがあっても 404。`..` を含むパスと、ルートの外へ出るシンボリックリンクも返さない。エンコードしたドット、スラッシュ、バックスラッシュ、NUL (`%2e` `%2f` `%5c` `%00`) を含むパスも 404
 - `proxied(...)` の鍵と元に聞く URL はパスだけ。クエリを見るのは `/tiles/` の `timestamp` と `/mcassets/skin` の `name` と `uuid` だけ
 - `/up/world/<ワールド>/<数字>` のほかは 404。元には `/up/world/<ワールド>/0` で聞く
-- API 用のホストは `/map/v1/` の `configuration` `world/<ワールド>/<数字>` `tiles/` `ws` だけ (map ホストの `/up/` `/tiles/` と同じ決まりで、元には `/map/v1/` の頭を削らずに聞く)。`Access-Control-Allow-Origin` は元のものをそのまま返す。ほかのパスは 404 (公開の設定は TORO-WebMap の `docs/map-deployment.md` が正本)
-- API 用のホストの元は環境変数 `EDGE_API_BACKEND` (`host:port`) で決める。決めなければ `EDGE_MAPWEB` と同じ (toro-webmap) で、決めたときだけ `/map/v1/` の HTTP と WebSocket がそちらへ行く (map ホストと 3d-map ホストは toro-webmap のまま)。WebSocket のパスはサイトごとに複数持てる (`Site.wsPaths`)
+- API 用のホストは `/map/v1/` の `configuration` `world/<ワールド>/<数字>` `tiles/` `ws` だけ (map ホストの `/up/` `/tiles/` と同じ決まりで、元には `/map/v1/` の頭を削らずに聞く)。`Access-Control-Allow-Origin` は元のものをそのまま返す。ほかのパスは 404 (公開の設定は 地図サーバー の `docs/map-deployment.md` が正本)
+- API 用のホストの元は環境変数 `EDGE_API_BACKEND` (`host:port`) で決める。決めなければ `EDGE_MAPWEB` と同じ (地図サーバー) で、決めたときだけ `/map/v1/` の HTTP と WebSocket がそちらへ行く (map ホストと 3d-map ホストは 地図サーバー のまま)。WebSocket のパスはサイトごとに複数持てる (`Site.wsPaths`)
 - `/maps/<地図>/live/` は `players.json` `markers.json` `sse` だけで、地図は BlueMap の `settings.json` の `maps` にあるものだけ (読めないときは止めない)
 
 ### 挙動
@@ -62,4 +62,4 @@ cd conformance && EDGE_BIN=../toro-edge go test -count=1 .   # 偽の元のサ�
 `conformance` の試験は実装の言語に依らず、`EDGE_BIN` に実行ファイルを渡すだけで流せます (省略すると、置き場の直下をビルドして使います)。
 外の部品は、Go の標準ライブラリと、すでに使っている brotli だけです。
 `conformance/tools/bench` と `cpuprobe.sh` は、負荷をかけて、入り口のコンテナが使った CPU を 1 リクエストあたりで測ります (`cpuprobe.sh` の最後の引数で、負荷をかける側の CPU と workers を増やせます)。`coldpass` は、空のキャッシュに同じ URL を 1 回ずつ取って、元に聞きに行く経路の時間を測ります。
-これらの道具は、`docker build -f conformance/tools/Dockerfile -t toro-edge:tools .` で 1 つのイメージにできます。
+これらの道具は、`docker build -f conformance/tools/Dockerfile -t edge-tools .` で 1 つのイメージにできます。

@@ -263,7 +263,7 @@ func worldUpdate(pre string) func(string) (string, bool) {
 // upWorld は /up/world/<ワールド>/<時刻> のワールド
 var upWorld = worldUpdate("/up/world/")
 
-// tileQuery は /tiles/ のクエリのうち、toro-webmap が見る timestamp=<数字> だけを取り出す (なければ "")
+// tileQuery は /tiles/ のクエリのうち、地図サーバー が見る timestamp=<数字> だけを取り出す (なければ "")
 func tileQuery(search string) string {
 	if search == "" {
 		return ""

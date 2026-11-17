@@ -33,10 +33,10 @@ func main() {
 	}
 	edge, err := startEdge(cfg, os.Stdout)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "toro-edge:", err)
+		fmt.Fprintln(os.Stderr, "edge:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("toro-edge listening on :%d (admin :%d), cache %d MiB, version %s\n", edge.Port, edge.AdminPort, cfg.CacheBytes>>20, version)
+	fmt.Printf("edge listening on :%d (admin :%d), cache %d MiB, version %s\n", edge.Port, edge.AdminPort, cfg.CacheBytes>>20, version)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)

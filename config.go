@@ -18,10 +18,10 @@ type Config struct {
 	Port int
 	// 管理用 (/healthz, /stats, POST /purge)。コンテナの中の 127.0.0.1 からだけ。Tunnel には出さない
 	AdminPort int
-	// toro-webmap (Nuxt)
+	// 地図サーバー (Nuxt)
 	MapWeb Endpoint
-	// api.torosaba.net の /map/v1/ (と、その WebSocket) の振り分け先。EDGE_API_BACKEND で決める。決めなければ MapWeb と同じ (toro-webmap)。
-	// 2D の地図 API を TORO-API (toro-api:8080) へ移すときは、これだけを変える
+	// api.torosaba.net の /map/v1/ (と、その WebSocket) の振り分け先。EDGE_API_BACKEND で決める。決めなければ MapWeb と同じ (地図サーバー)。
+	// 2D の地図 API を TORO-API へ移すときは、これだけを変える
 	ApiBackend Endpoint
 	// BlueMap 内蔵の Web サーバー (ライブ情報)
 	BlueMapLive Endpoint
@@ -108,7 +108,7 @@ func loadConfig(env map[string]string) Config {
 			maxEntity = n
 		}
 	}
-	mapWeb := endpoint(envOr(env, "EDGE_MAPWEB", "toro-webmap:3000"), 3000)
+	mapWeb := endpoint(envOr(env, "EDGE_MAPWEB", "localhost:3000"), 3000)
 	apiBackend := mapWeb
 	if v := envOr(env, "EDGE_API_BACKEND", ""); v != "" {
 		apiBackend = endpoint(v, 3000)
@@ -118,7 +118,7 @@ func loadConfig(env map[string]string) Config {
 		AdminPort:       envInt(env, "EDGE_ADMIN_PORT", 8081),
 		MapWeb:          mapWeb,
 		ApiBackend:      apiBackend,
-		BlueMapLive:     endpoint(envOr(env, "EDGE_BLUEMAP_LIVE", "toro-main:8100"), 8100),
+		BlueMapLive:     endpoint(envOr(env, "EDGE_BLUEMAP_LIVE", "localhost:8100"), 8100),
 		DynmapWeb:       envOr(env, "EDGE_DYNMAP_WEB", "/srv/dynmap-web"),
 		BlueMapWeb:      envOr(env, "EDGE_BLUEMAP_WEB", "/srv/bluemap-web"),
 		HostsMap:        hostList(env["EDGE_HOST_MAP"], "map.torosaba.net"),
