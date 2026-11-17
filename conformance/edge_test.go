@@ -1254,3 +1254,56 @@ func TestApiHostWebSocket(t *testing.T) {
 		eq(t, e.api("/map/v1/ws").status, 426)
 	})
 }
+
+func TestApiBackendEnv(t *testing.T) {
+	// EDGE_API_BACKEND を決めると、api.torosaba.net の /map/v1/ (と WebSocket) だけが別の元へ行く。map.torosaba.net と 3d-map は toro-webmap のまま
+	withEnv(t, overrides{apiBackend: true}, func(e *env) {
+		okJSON := func(w http.ResponseWriter, _ *http.Request) {
+			sendText(w, 200, hdr("content-type", "application/json", "access-control-allow-origin", "*", "cache-control", "no-cache"), `{"ok":true}`)
+		}
+		e.mapweb.setHandler(okJSON)
+		e.apiback.setHandler(okJSON)
+
+		// HTTP: 頭を削らずに新しい元へ。toro-webmap には行かない
+		eq(t, e.api("/map/v1/configuration").status, 200)
+		eq(t, e.api("/map/v1/world/main/5").status, 200)
+		eq(t, e.api("/map/v1/tiles/main/flat/0_0/0_0.png?timestamp=5&x=1").status, 200)
+		eq(t, e.apiback.seenLen(), 3)
+		eq(t, e.apiback.seenAt(0).URL, "/map/v1/configuration")
+		eq(t, e.apiback.seenAt(1).URL, "/map/v1/world/main/0")
+		eq(t, e.apiback.seenAt(2).URL, "/map/v1/tiles/main/flat/0_0/0_0.png?timestamp=5")
+		eq(t, e.mapweb.seenLen(), 0)
+
+		// map.torosaba.net は今までどおり toro-webmap へ
+		eq(t, e.get("/up/configuration").status, 200)
+		eq(t, e.mapweb.seenLen(), 1)
+		eq(t, e.apiback.seenLen(), 3)
+
+		// WebSocket: api の /map/v1/ws は新しい元へ、map の /up/ws は toro-webmap へ
+		e.apiback.setHandler(e.apiback.echoUpgrade)
+		e.mapweb.setHandler(e.mapweb.echoUpgrade)
+		for _, c := range []struct{ host, path string }{{"api.torosaba.net", "/map/v1/ws"}, {"map.torosaba.net", "/up/ws"}} {
+			conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(e.edge.port))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			conn.SetDeadline(time.Now().Add(10 * time.Second))
+			fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: https://map.torosaba.net\r\n\r\n", c.path, c.host)
+			br := bufio.NewReader(conn)
+			res, err := http.ReadResponse(br, &http.Request{Method: "GET"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			eq(t, res.StatusCode, 101, c.host)
+			conn.Close()
+		}
+		eq(t, e.apiback.seenAt(-1).URL, "/map/v1/ws")
+		eq(t, e.mapweb.seenAt(-1).URL, "/up/ws")
+		eq(t, e.apiback.seenLen(), 4)
+		eq(t, e.mapweb.seenLen(), 2)
+
+		// WebSocket でない GET は今までどおり edge が 426
+		eq(t, e.api("/map/v1/ws").status, 426)
+	})
+}

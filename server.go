@@ -21,6 +21,7 @@ type Edge struct {
 	cache     *EntityCache
 	sites     *Sites
 	mapWeb    *Upstream
+	apiBack   *Upstream // api.torosaba.net の振り分け先。ApiBackend が MapWeb と同じなら mapWeb と同じもの
 	live      *Upstream
 	log       *AccessLog
 	out       io.Writer
@@ -43,9 +44,13 @@ func startEdge(cfg Config, out io.Writer) (*Edge, error) {
 		log:    newAccessLog(out, cfg.AccessLog),
 		stop:   make(chan struct{}),
 	}
+	e.apiBack = e.mapWeb
+	if cfg.ApiBackend != cfg.MapWeb {
+		e.apiBack = newUpstream("api-backend", cfg.ApiBackend, 256, 3*time.Second)
+	}
 	dyn := newStaticSite(cfg.DynmapWeb)
 	blue := newStaticSite(cfg.BlueMapWeb, "maps")
-	e.sites = buildSites(SiteDeps{config: cfg, cache: e.cache, mapWeb: e.mapWeb, live: e.live, dynmapStatic: dyn, blueMapStatic: blue})
+	e.sites = buildSites(SiteDeps{config: cfg, cache: e.cache, mapWeb: e.mapWeb, apiBack: e.apiBack, live: e.live, dynmapStatic: dyn, blueMapStatic: blue})
 
 	// 静的なファイルは、起動してすぐ返せるよう裏で読んでおく (読み終わるまでは、そのつどディスクから読む)
 	for _, p := range e.sites.preload {
@@ -117,12 +122,12 @@ func (e *Edge) handle(c *Ctx) {
 		}
 	}()
 	if req.upgrade {
-		// WebSocket (サイトごとに決めた 1 つのパスだけ: map と 3d-map は /up/ws、api は /map/v1/ws): つないだあとは何も解かずにそのまま渡す
-		if e.srv.closing.Load() || site.wsPath == "" || c.path != site.wsPath {
+		// WebSocket (サイトごとに決めたパスだけ: map と 3d-map は /up/ws、api は /map/v1/ws): つないだあとは何も解かずに、サイトの渡し先へそのまま渡す
+		if e.srv.closing.Load() || !site.wsAllowed(c.path) {
 			notFound(c)
 			return
 		}
-		proxyUpgrade(c, e.cfg.MapWeb, site.wsPath+c.search)
+		proxyUpgrade(c, site.wsTarget, c.path+c.search)
 		return
 	}
 	if c.method != "GET" && c.method != "HEAD" {
@@ -236,6 +241,9 @@ func (e *Edge) close(grace time.Duration) {
 	closeAllSockets()
 	e.admin.Close()
 	e.mapWeb.close()
+	if e.apiBack != e.mapWeb {
+		e.apiBack.close()
+	}
 	e.live.close()
 	e.log.flush()
 }

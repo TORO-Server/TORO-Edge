@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"sync/atomic"
 	"time"
 )
@@ -107,9 +108,11 @@ type Handler func(c *Ctx)
 // Site は Host ごとの経路の決まり
 type Site struct {
 	name string
-	// WebSocket (Upgrade) を元に渡すパス。空ならこのサイトは WebSocket を受けない
-	wsPath string
-	route  func(path string, c *Ctx) Handler
+	// WebSocket (Upgrade) を元に渡すパス (完全一致。複数)。空ならこのサイトは WebSocket を受けない
+	wsPaths []string
+	// WebSocket を渡す先
+	wsTarget Endpoint
+	route    func(path string, c *Ctx) Handler
 }
 
 // Rule は経路の 1 つ。exact / prefix / fn のどれか 1 つを使う。fn は合えば、取り出した部分 (なければ "") と true を返す
@@ -175,4 +178,9 @@ func countStatus(stripe uint32, status int) {
 	default:
 		stats.s5xx.add(stripe, 1)
 	}
+}
+
+// wsAllowed は path が、このサイトで WebSocket を渡すパスか
+func (s *Site) wsAllowed(path string) bool {
+	return slices.Contains(s.wsPaths, path)
 }
