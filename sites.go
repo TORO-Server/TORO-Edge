@@ -72,6 +72,7 @@ type SiteDeps struct {
 	config        Config
 	cache         *EntityCache
 	mapWeb        *Upstream
+	apiBack       *Upstream
 	live          *Upstream
 	dynmapStatic  *StaticSite
 	blueMapStatic *StaticSite
@@ -102,9 +103,9 @@ func buildSites(d SiteDeps) *Sites {
 	pathOnly := func(c *Ctx) (string, string) { return c.path, "" }
 
 	// proxied は toro-webmap (Nuxt) の返事をためて返す。クエリを使うものは key と path を決める
-	proxied := func(ns *nsCache, mutate func(o *CachedOptions)) Handler {
+	proxiedVia := func(up *Upstream, ns *nsCache, mutate func(o *CachedOptions)) Handler {
 		o := CachedOptions{
-			upstream:       d.mapWeb,
+			upstream:       up,
 			cache:          ns,
 			key:            pathKey,
 			path:           pathOnly,
@@ -116,6 +117,7 @@ func buildSites(d SiteDeps) *Sites {
 		mutate(&o)
 		return cachedHandler(o)
 	}
+	proxied := func(ns *nsCache, mutate func(o *CachedOptions)) Handler { return proxiedVia(d.mapWeb, ns, mutate) }
 
 	deny := Rule{first: true, fn: func(p string) (string, bool) { return "", denyPath(p) }, handler: notFound}
 
@@ -130,22 +132,23 @@ func buildSites(d SiteDeps) *Sites {
 
 	// ───────────── Dynmap の API (設定、ワールドの更新、タイル)。map.torosaba.net の /up/ と /tiles/、api.torosaba.net の /map/v1/ で、パスの頭だけが違う。
 	// どちらも元 (toro-webmap) へ、客が来たパスのまま聞く (頭を削らない)。toro-webmap が付ける Access-Control-Allow-Origin は、そのまま返す
-	dynmapAPI := func(ns *nsCache, p dynmapPaths) []Rule {
+	// up は元 (map.torosaba.net は toro-webmap、api.torosaba.net は ApiBackend)
+	dynmapAPI := func(up *Upstream, ns *nsCache, p dynmapPaths) []Rule {
 		return []Rule{
 			// 設定とワールドの更新。全員が 2 秒ごとに読むので、ワールドごとに 1 秒だけまとめる (中身は時刻によらず同じ)
-			exactRule(p.config, proxied(ns, func(o *CachedOptions) {
+			exactRule(p.config, proxiedVia(up, ns, func(o *CachedOptions) {
 				o.key = func(*Ctx) string { return "config" }
 				o.fixedTtl, o.swr = 5*sec, 5*sec
 			})),
 			// 元に聞く URL も鍵から作る (先頭の客の時刻やクエリを、ワールドで 1 つの返事に持ち込まない)。時刻は見ないので 0
-			fnRule(worldUpdate(p.world), proxied(ns, func(o *CachedOptions) {
+			fnRule(worldUpdate(p.world), proxiedVia(up, ns, func(o *CachedOptions) {
 				o.key = func(c *Ctx) string { return "update:" + c.cap }
 				o.path = func(c *Ctx) (string, string) { return p.world + c.cap + "/0", "" }
 				o.fixedTtl, o.swr, o.negativeTtl = sec, 2*sec, 2*sec
 			})),
 			// 地図のタイル、マーカー、プレイヤーの顔。キャッシュの長さは toro-webmap の Cache-Control に従う (なければ 5 分)
 			// 描き直したタイルは ?timestamp= で別の URL になる (クエリはこれだけを見る)
-			prefixRule(p.tiles, proxied(ns, func(o *CachedOptions) {
+			prefixRule(p.tiles, proxiedVia(up, ns, func(o *CachedOptions) {
 				o.key = func(c *Ctx) string {
 					if q := tileQuery(c.search); q != "" {
 						return c.path + "?" + q
@@ -191,7 +194,7 @@ func buildSites(d SiteDeps) *Sites {
 		})),
 		// JsonFileClientUpdateComponent が書き出す
 		exactRule("/standalone/config.js", staticHandler(d.dynmapStatic, mapNoCache, staticOptions{})),
-	}, dynmapAPI(nsMap, dynmapPaths{config: "/up/configuration", world: "/up/world/", tiles: "/tiles/"}), []Rule{
+	}, dynmapAPI(d.mapWeb, nsMap, dynmapPaths{config: "/up/configuration", world: "/up/world/", tiles: "/tiles/"}), []Rule{
 		// 更新とプレイヤーの位置を届ける WebSocket (サーバーが Upgrade を見て渡す。つながらないときは、ブラウザが上の 2 つを取りに来る)
 		exactRule("/up/ws", upgradeRequired),
 		// Web チャットやログインは使っていない
@@ -364,14 +367,18 @@ func buildSites(d SiteDeps) *Sites {
 	// ───────────── api.torosaba.net の /map/v1/ (Dynmap の API。ブラウザは map.torosaba.net の画面から、別のオリジンとして読む)
 	// Tunnel が /map/* だけをここへ渡す (それ以外のパスは toro-api へ行き、ここには来ない)。来たら 404。
 	// BlueMap の決まりのように access-control-allow-origin を外さない (外すと、別オリジンの画面が読めない)
-	apiRules := slices.Concat([]Rule{deny}, dynmapAPI(d.cache.space(), dynmapPaths{config: "/map/v1/configuration", world: "/map/v1/world/", tiles: "/map/v1/tiles/"}), []Rule{
-		exactRule("/map/v1/ws", upgradeRequired),
-		prefixRule("/", notFound),
-	})
-	mapSite := &Site{name: "map", wsPath: "/up/ws", route: compileRules(mapRules)}
-	blueSite := &Site{name: "bluemap", wsPath: "/up/ws", route: compileRules(blueRules)}
+	// 振り分け先は cfg.ApiBackend (既定は toro-webmap。EDGE_API_BACKEND で toro-api などへ変える)。ためる場所 (名前の空間) は元を変えても同じ
+	// WebSocket は apiWSPaths の頭ごとに 1 本 (将来の /map3d/v1/ws もここへ足す)。WebSocket でない GET は 426
+	apiWSPaths := []string{"/map/v1/ws"}
+	apiRules := slices.Concat([]Rule{deny}, dynmapAPI(d.apiBack, d.cache.space(), dynmapPaths{config: "/map/v1/configuration", world: "/map/v1/world/", tiles: "/map/v1/tiles/"}))
+	for _, p := range apiWSPaths {
+		apiRules = append(apiRules, exactRule(p, upgradeRequired))
+	}
+	apiRules = append(apiRules, prefixRule("/", notFound))
+	mapSite := &Site{name: "map", wsPaths: []string{"/up/ws"}, wsTarget: cfg.MapWeb, route: compileRules(mapRules)}
+	blueSite := &Site{name: "bluemap", wsPaths: []string{"/up/ws"}, wsTarget: cfg.MapWeb, route: compileRules(blueRules)}
 	assetSite := &Site{name: "assets", route: compileRules(assetRules)}
-	apiSite := &Site{name: "api", wsPath: "/map/v1/ws", route: compileRules(apiRules)}
+	apiSite := &Site{name: "api", wsPaths: apiWSPaths, wsTarget: cfg.ApiBackend, route: compileRules(apiRules)}
 
 	byHost := map[string]*Site{}
 	for _, h := range cfg.HostsMap {
