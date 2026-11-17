@@ -155,3 +155,23 @@ func TestHasToken(t *testing.T) {
 		t.Error("hasToken")
 	}
 }
+
+func TestApiBackendDefault(t *testing.T) {
+	// EDGE_API_BACKEND を決めなければ、api の振り分け先は MapWeb と同じ (現行どおり toro-webmap)
+	cfg := loadConfig(map[string]string{})
+	if cfg.ApiBackend != cfg.MapWeb || cfg.ApiBackend.Addr() != "toro-webmap:3000" {
+		t.Fatalf("default api backend = %v, map web = %v", cfg.ApiBackend, cfg.MapWeb)
+	}
+	cfg = loadConfig(map[string]string{"EDGE_MAPWEB": "example:4000"})
+	if cfg.ApiBackend != cfg.MapWeb {
+		t.Fatalf("api backend should follow EDGE_MAPWEB when unset: %v", cfg.ApiBackend)
+	}
+	cfg = loadConfig(map[string]string{"EDGE_API_BACKEND": "toro-api:8080"})
+	if cfg.ApiBackend.Addr() != "toro-api:8080" || cfg.MapWeb.Addr() != "toro-webmap:3000" {
+		t.Fatalf("api backend = %v, map web = %v", cfg.ApiBackend, cfg.MapWeb)
+	}
+	cfg = loadConfig(map[string]string{"EDGE_API_BACKEND": "toro-api"})
+	if cfg.ApiBackend.Addr() != "toro-api:3000" {
+		t.Fatalf("port default: %v", cfg.ApiBackend)
+	}
+}

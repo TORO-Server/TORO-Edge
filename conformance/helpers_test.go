@@ -294,10 +294,12 @@ func readReply(br *bufio.Reader, method string) (*reply, error) {
 
 type config struct {
 	mapWeb, blueMapLive int
-	dynmapWeb           string
-	blueMapWeb          string
-	cacheBytes          int
-	maxEntityBytes      int
+	// 0 は EDGE_API_BACKEND を決めない (実装の既定)
+	apiBackend     int
+	dynmapWeb      string
+	blueMapWeb     string
+	cacheBytes     int
+	maxEntityBytes int
 	// nil は実装の既定。0 なら、大きい本文も write で送る
 	sendfileMin *int
 }
@@ -323,6 +325,9 @@ func startBinary(t *testing.T, c config) *edgeHandle {
 		"EDGE_CACHE_BYTES=" + strconv.Itoa(c.cacheBytes),
 		"EDGE_MAX_ENTITY_BYTES=" + strconv.Itoa(c.maxEntityBytes),
 		"EDGE_SHUTDOWN_GRACE_MS=200",
+	}
+	if c.apiBackend != 0 {
+		env = append(env, fmt.Sprintf("EDGE_API_BACKEND=127.0.0.1:%d", c.apiBackend))
 	}
 	if c.sendfileMin != nil {
 		env = append(env, "EDGE_SENDFILE_MIN="+strconv.Itoa(*c.sendfileMin))
@@ -403,9 +408,11 @@ func startBinary(t *testing.T, c config) *edgeHandle {
 // ---- 試験の環境 ----
 
 type env struct {
-	t               *testing.T
-	edge            *edgeHandle
-	mapweb, live    *fake
+	t            *testing.T
+	edge         *edgeHandle
+	mapweb, live *fake
+	// EDGE_API_BACKEND を決めたときだけ (決めなければ nil。api.torosaba.net は mapweb へ行く)
+	apiback         *fake
 	dynDir, blueDir string
 }
 
@@ -419,6 +426,8 @@ var css = strings.Repeat(".dynmap { color: red; margin: 0 auto; }\n", 120)
 type overrides struct {
 	cacheBytes, maxEntityBytes int
 	sendfileMin                *int
+	// api.torosaba.net の振り分け先を、別の元に決める (EDGE_API_BACKEND)
+	apiBackend bool
 }
 
 func put(t *testing.T, root, rel string, content []byte) {
@@ -454,6 +463,12 @@ func withEnv(t *testing.T, o overrides, fn func(e *env)) {
 
 	mapweb := startFake(t)
 	live := startFake(t)
+	var apiback *fake
+	apiPort := 0
+	if o.apiBackend {
+		apiback = startFake(t)
+		apiPort = apiback.port
+	}
 	cacheBytes, maxEntity := o.cacheBytes, o.maxEntityBytes
 	if cacheBytes == 0 {
 		cacheBytes = 64 << 20
@@ -462,7 +477,7 @@ func withEnv(t *testing.T, o overrides, fn func(e *env)) {
 		maxEntity = 8 << 20
 	}
 	edge := startBinary(t, config{
-		mapWeb: mapweb.port, blueMapLive: live.port,
+		mapWeb: mapweb.port, blueMapLive: live.port, apiBackend: apiPort,
 		dynmapWeb: dynDir, blueMapWeb: blueDir,
 		cacheBytes: cacheBytes, maxEntityBytes: maxEntity, sendfileMin: o.sendfileMin,
 	})
@@ -470,8 +485,11 @@ func withEnv(t *testing.T, o overrides, fn func(e *env)) {
 		edge.stop()
 		mapweb.stop()
 		live.stop()
+		if apiback != nil {
+			apiback.stop()
+		}
 	}()
-	fn(&env{t: t, edge: edge, mapweb: mapweb, live: live, dynDir: dynDir, blueDir: blueDir})
+	fn(&env{t: t, edge: edge, mapweb: mapweb, live: live, apiback: apiback, dynDir: dynDir, blueDir: blueDir})
 }
 
 func (e *env) req(port int, host, path string, o []reqOpts) *reply {
