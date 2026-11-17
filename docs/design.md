@@ -14,6 +14,13 @@
 - `/up/world/<ワールド>/<数字>` のほかは 404。元には `/up/world/<ワールド>/0` で聞く
 - API 用のホストは `/map/v1/` の `configuration` `world/<ワールド>/<数字>` `tiles/` `ws` だけ (map ホストの `/up/` `/tiles/` と同じ決まりで、元には `/map/v1/` の頭を削らずに聞く)。`Access-Control-Allow-Origin` は元のものをそのまま返す。ほかのパスは 404 (公開の設定は TORO-WebMap の `docs/map-deployment.md` が正本)
 - API 用のホストの元は環境変数 `EDGE_API_BACKEND` (`host:port`) で決める。決めなければ `EDGE_MAPWEB` と同じ (toro-webmap) で、決めたときだけ `/map/v1/` の HTTP と WebSocket がそちらへ行く (map ホストと 3d-map ホストは toro-webmap のまま)。WebSocket のパスはサイトごとに複数持てる (`Site.wsPaths`)
+- API 用のホストの `/map3d/v1/` (3D の地図の API) も、元 (`EDGE_API_BACKEND`) へ頭を削らずに渡す。決まりは次のとおりで、ほかのパスは元に聞かずに 404。元の `Access-Control-Allow-Origin` は外さず、書き換えない (3D の画面は別のオリジンから読む)
+  - `maps/<地図>/` の `tiles/` `settings.json` `textures.json` `assets/`: 60 秒まとめる (`CDN-Cache-Control: max-age=60`)。404 と 204 は短く覚える
+  - `maps/<地図>/live/markers.json` と `live/players.json`: 1 秒まとめる。`live/sse` はためずに流す
+  - `marumasign/resolve` と `marumasign/proxy`: ためずに流す (`Range` `Origin` `Sec-Fetch-Site` を渡す)。Cloudflare が付けた客の IP (`cf-connecting-ip`) を `X-Toro-Client-Ip` で渡す (客が書いたものは渡さない)。`marumasign/<地図>.json` は `no-cache`。地図の名前は英数字と `_` `.` `-` の 64 文字まで
+  - `mcassets/skin` (クエリは `name` と `uuid` だけ)、`mcassets/index.json`、`mcassets/<ハッシュ>/...`: 元の Cache-Control のとおり、最大 1 日ためる
+  - `ws`: WebSocket を元へ渡す (`apiWSPaths` に `/map3d/v1/ws`)
+  - `OPTIONS` (CORS の確認) は、この頭の下だけ元が答える (`Access-Control-Request-*` と `Origin` を渡し、返事はそのまま返す)。ほかのパスの `OPTIONS` は今までどおり 405
 - `/maps/<地図>/live/` は `players.json` `markers.json` `sse` だけで、地図は BlueMap の `settings.json` の `maps` にあるものだけ (読めないときは止めない)
 
 ### 挙動
@@ -23,7 +30,7 @@
 - ためた量には、鍵の長さと、捨てたが送っている最中でまだ閉じていないファイルも数える。1 KiB を超える鍵はためずに流す。もう返さないものは裏で少しずつ捨てる。404 を古いものとして返すのは 1 分まで
 - 圧縮は段ごとに待ち行列の上限 (256 個、128 MiB) があり、いっぱいなら、圧縮していないものを返す。待っているあいだに捨てられたものは作らない。fast の段も 2 秒までしか待たない
 - BlueMap のライブ情報は 1 秒まとめる (ゲームサーバーに毎秒 1 回)
-- WebSocket (map / 3d-map は `/up/ws`、api は `/map/v1/ws`) と SSE (`live/sse`) は、解かずにそのまま流す
+- WebSocket (map / 3d-map は `/up/ws`、api は `/map/v1/ws` と `/map3d/v1/ws`) と SSE (`live/sse`) は、解かずにそのまま流す
 - 流すもの (SSE、動画、大きくてためられないもの) は、ためるための接続と別の口で元につなぐ。遅い客や終わらない返事で、ためる経路を待たせない
 - 1 つの客 (`CF-Connecting-IP`。IPv6 は /64 ごと) が同時に使える数には上限がある (流すもの 64、SSE 8、WebSocket 16)。超えたら 429。中継サービスを通っていない接続は数えない
 - 元に渡す頭書きは決めたものだけ。`X-Toro-Client-IP` を客が書いても渡さない (assets 用のホストでは、客の IP から作る)
