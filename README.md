@@ -1,138 +1,20 @@
 # toro-edge
 
-map.torosaba.net (Dynmap)、3d-map.torosaba.net (BlueMap)、assets.torosaba.net の入り口になる、自前のリバースプロキシです。
-Go 製。標準ライブラリと brotli のライブラリだけで、イメージは 8 MB ほどです。
+TORO の地図サイトと素材の配信サイトの入り口になる、自前のリバースプロキシ (外からの要求を受け、中の各サービスへ振り分ける中継サービス) です。Go で書かれています。標準ライブラリと brotli (圧縮の部品) だけを使っています。
 
-```
-ブラウザ → Cloudflare → cloudflared ─→ toro-edge:80 ─┬─ ファイルをメモリから返す (Dynmap の web/、BlueMap の web/)
-                                                       ├─ toro-webmap:3000 (Nuxt。TiDB の地図のデータ、画面) ← メモリにためる
-                                                       └─ toro-main:8100 (BlueMap のライブ情報、SSE)
-```
+静的なファイルはメモリから返し、地図のデータは [TORO-WebMap](https://github.com/TORO-Server/TORO-WebMap) の返事をメモリにためて返します。
 
-## イメージ
-
-GitHub Actions が、試験に通ったものだけを GHCR に置きます (linux/amd64 と linux/arm64)。
-イメージは `ghcr.io/toro-server/toro-edge` にあります。
+## 動かしてみる
 
 ```bash
-echo "<read:packages だけの PAT>" | docker login ghcr.io -u <GitHub のユーザー名> --password-stdin
-docker pull ghcr.io/toro-server/toro-edge:1.0.0
-```
-
-タグは、`latest` (main の先頭)、`sha-<短い ID>`、リリース (`v1.2.3` のタグを打つと `1.2.3` と `1.2`) です。サーバーでは、リリースのタグに固定して使います。
-
-```yaml
-# docker-compose.yaml
-  toro-edge:
-    image: ghcr.io/toro-server/toro-edge:1.0.0
-    container_name: toro-edge
-    user: "1000:1001"
-    restart: unless-stopped
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    mem_limit: 3g
-    stop_grace_period: 15s
-    volumes:
-      - "./main/plugins/dynmap/web:/srv/dynmap-web:ro"
-      - "./main/bluemap/web:/srv/bluemap-web:ro"
-    environment:
-      - EDGE_MAPWEB=toro-webmap:3000
-      - EDGE_BLUEMAP_LIVE=toro-main:8100
-      - EDGE_CACHE_MB=2048
-    healthcheck:
-      test: ["CMD", "/toro-edge", "healthcheck"]
-      interval: 15s
-      timeout: 3s
-      retries: 3
-      start_period: 5s
-    networks: [minecraft-network]
-```
-
-`latest` は main の最新、`vX.Y.Z` はタグ、`sha-<7 桁>` はコミットです。イメージには `healthcheck` のサブコマンドが入っています (`wget` などは入っていません)。
-
-## 設定 (環境変数)
-
-| 変数 | 既定 | |
-|---|---|---|
-| `EDGE_PORT` | 80 | 公開のポート |
-| `EDGE_ADMIN_PORT` | 8081 | 管理用のポート (`/healthz` `/stats` `POST /purge`)。コンテナの中の 127.0.0.1 だけで聞く (ほかのコンテナからは届かない)。Tunnel には出さない |
-| `EDGE_ADMIN_TOKEN` | なし | 付けると、`/healthz` 以外と `/debug/pprof/` に `Authorization: Bearer <値>` か `X-Admin-Token: <値>` を求める |
-| `EDGE_MAPWEB` | `toro-webmap:3000` | toro-webmap (Nuxt) |
-| `EDGE_BLUEMAP_LIVE` | `toro-main:8100` | BlueMap 内蔵の Web サーバー (ライブ情報、SSE) |
-| `EDGE_DYNMAP_WEB` / `EDGE_BLUEMAP_WEB` | `/srv/dynmap-web` / `/srv/bluemap-web` | ファイルのまま返すフォルダ (読むだけ) |
-| `EDGE_HOST_MAP` / `EDGE_HOST_BLUEMAP` / `EDGE_HOST_ASSETS` / `EDGE_HOST_API` | 4 つの名前 | サイトごとの Host (カンマ区切りで複数)。既定は map. / 3d-map. / assets. / api.torosaba.net |
-| `EDGE_CACHE_MB` | 2048 | 地図のデータをためる上限 (MiB)。1 つの返事が 1/8 (最大 32 MiB) を超えたら、ためずに流す |
-| `EDGE_ACCESS_LOG` | 1 | `0` でアクセスログを出さない |
-| `EDGE_DEBUG_HEADERS` | 0 | `1` で返事に `x-edge-cache` を付ける (試験用) |
-| `EDGE_SHUTDOWN_GRACE_MS` | 10000 | 止めるとき、返し終えていないものを待つ時間 |
-| `EDGE_SENDFILE_MIN` | 65536 | この大きさ (バイト) 以上の本文を、メモリ上のファイル (memfd) から `sendfile` で送る。`0` で使わない (Linux だけ) |
-| `EDGE_PPROF` | 0 | `1` で管理用のポートに `/debug/pprof/` を出す |
-| `GOMEMLIMIT` / `GOGC` | `2600MiB` / `200` | Go のメモリの目安 (イメージで設定済み) |
-
-イメージに `wget` や `curl` はないので、キャッシュを空にするときは、同じネットワークの名前空間で別のコンテナから聞きます。
-
-```bash
-docker run --rm --network container:toro-edge curlimages/curl -fsS -X POST http://127.0.0.1:8081/purge
-```
-
-## 経路の決まり
-
-サイトごとの location は `sites.go` にあります (`first` → 完全一致 → 上から順の最初)。
-
-- `proxied(...)`: toro-webmap の返事をためる。`fixedTtl` (元の Cache-Control を無視する長さ)、`defaultTtl` / `maxTtl` (元の max-age に従う)、`swr` (古いまま返してよい長さ)、`errorTtl` (元が壊れているとき古いまま返してよい長さ)、`response` (頭書きの付け替え)
-- `staticHandler(...)`: フォルダのファイル。`transform` で書き換える
-- `streamHandler(...)`: ためずに流す (`/_marumasign/`、assets、BlueMap の SSE)
-- `.php`、`/.` を含むパスは、ファイルがあっても 404。`..` を含むパスと、ルートの外へ出るシンボリックリンクも返さない。エンコードしたドット、スラッシュ、バックスラッシュ、NUL (`%2e` `%2f` `%5c` `%00`) を含むパスも 404
-- `proxied(...)` の鍵と元に聞く URL はパスだけ。クエリを見るのは `/tiles/` の `timestamp` と `/mcassets/skin` の `name` と `uuid` だけ
-- `/up/world/<ワールド>/<数字>` のほかは 404。元には `/up/world/<ワールド>/0` で聞く
-- api ホスト (`api.torosaba.net`) は `/map/v1/` の `configuration` `world/<ワールド>/<数字>` `tiles/` `ws` だけ (map ホストの `/up/` `/tiles/` と同じ決まりで、元には `/map/v1/` の頭を削らずに聞く)。`Access-Control-Allow-Origin` は元のものをそのまま返す。ほかのパスは 404 (ここへ渡す Tunnel の公開ルールは、TORO-WebMap の `docs/map-deployment.md` が正本)
-- `/maps/<地図>/live/` は `players.json` `markers.json` `sse` だけで、地図は BlueMap の `settings.json` の `maps` にあるものだけ (読めないときは止めない)
-
-### 挙動
-
-- 静的なファイルは起動時にメモリへ読み込み、brotli 11 / gzip 9 を 1 度だけ作る。ETag は内容から。変わったら約 1 秒で読み直す
-- 地図のデータはメモリの LRU。古くなったら古いまま返し、裏で `If-None-Match` で確かめる (304 なら TiDB を読まない)。同じものを同時に聞かない。元が壊れていても、ためたものを返す
-- ためた量には、鍵の長さと、捨てたが送っている最中でまだ閉じていないファイルも数える。1 KiB を超える鍵はためずに流す。もう返さないものは裏で少しずつ捨てる。404 を古いものとして返すのは 1 分まで
-- 圧縮は段ごとに待ち行列の上限 (256 個、128 MiB) があり、いっぱいなら、そのままの版を返す。待っているあいだに捨てられたものは作らない。fast の段も 2 秒までしか待たない
-- BlueMap のライブ情報は 1 秒まとめる (toro-main に毎秒 1 回)
-- WebSocket (map / 3d-map は `/up/ws`、api は `/map/v1/ws`) と SSE (`live/sse`) は、解かずにそのまま流す
-- 流すもの (SSE、動画、大きくてためられないもの) は、ためるための接続と別の口で元につなぐ。遅い客や終わらない返事で、ためる経路を待たせない
-- 1 つの客 (`CF-Connecting-IP`。IPv6 は /64 ごと) が同時に使える数には上限がある (流すもの 64、SSE 8、WebSocket 16)。超えたら 429。Cloudflare を通っていないもの (Docker の中) は数えない
-- 元に渡す頭書きは決めたものだけ。`X-Toro-Client-IP` を客が書いても渡さない (assets は Cloudflare の IP から作る)
-- GET と HEAD だけ。本文のあるリクエストは断ってつなぎを閉じる。8 KB を超える URL は 414
-- 付け足す頭書き (CSP など) は成功の返事にだけ付ける。404 は 2〜5 秒覚える。`/index.html` の 301 は相対の `Location`
-
-## 作り
-
-HTTP/1.1 のサーバーも、このプロキシのために作ってあります (`httpserver.go`)。Cloudflare と Docker の中の自分たちだけが相手なので、必要なものを厳しめに実装しています。
-
-- 読む頭書きは決まったものだけ。折り返し (obs-fold)、LF だけの改行、重複した Content-Length / Host (先のものの値が空でも)、値の空の Content-Length、token でない頭書き名とメソッド、値の制御文字 (タブを除く) は 400。Transfer-Encoding は値によらず本文のあるリクエストとして断る。頭書きが 16 KB を超えたら 431、リクエストの行が長すぎたら 414
-- 返事の頭書きは、返事ができたときに文字列にしてあり、返すときは `Date` を足して並べるだけ。頭書きと本文を 1 回の `writev` で送る (標準の `net/http` は 4 KB を超えると 2 回に分けるうえ、毎回頭書きを並べ替える)
-- 64 KB 以上の本文は、メモリ上のファイル (`memfd_create`) にも置いて、`sendfile` で送る。`write` で送ると本文をカーネルへ写す分の CPU がかかる。ファイルは返事と同じ寿命で、捨てたときは、送っている最中の客がいなくなった時点で閉じる。閉じたあとに来た客には、そのままの版をメモリから返す。`sendfile` が使えないときは、読んで `write` で送る
-- どの返事の書き込みにも期限を付ける (読まない客に待たされない)。小さい返事では、残りが半分あるあいだ期限を付け直さない
-- キャッシュの検索は `sync.Map` (ヒットのときはロックなし、鍵も作り直さない)。経路の判定は正規表現を使わない。全コアが増やす数は、コアごとにばらして数える
-- 流している返事 (動画、SSE) は、客が切れたら元も切る。止めるときは、新しいつなぎを受けず、返し終えていないものを待つ
-
-| ファイル | |
-|---|---|
-| `httpserver.go` | HTTP/1.1 のサーバー (パース、つなぎ、止め方) |
-| `respond.go` / `sendfile_*.go` | 返事の送り方 (writev、sendfile、チャンク、切れたかの見張り) |
-| `sites.go` / `router.go` | 経路の決まり |
-| `cached.go` / `cache.go` / `entity.go` | ためる (単一飛行、古いまま返す、304 で延ばす、圧縮した版) |
-| `static.go` | ファイルのストア (読み込み、変更の検知、安全なパス) |
-| `stream.go` / `upstream.go` / `ws.go` / `limit.go` | ためずに流す、元への接続、WebSocket、客ごとの上限 |
-| `conformance/` | 実行ファイルを外から確かめる試験と、負荷の道具 (すべて Go) |
-
-## 試験
-
-```bash
-go vet ./... && go test -race .               # 単体 (パーサーの異常系、パイプライン、チャンク、止め方 ほか)
+go vet ./... && go test .                 # 単体の試験
 go build -o toro-edge .
-cd conformance && EDGE_BIN=../toro-edge go test -count=1 .   # 偽の元のサーバーを相手にした 32 件 (sendfile の 4 件を含む)
+cd conformance && EDGE_BIN=../toro-edge go test -count=1 .   # 実行ファイルを外から確かめる試験
 ```
 
-`conformance` の試験は実装の言語に依らず、`EDGE_BIN` に実行ファイルを渡すだけで流せます (省略すると、リポジトリの直下をビルドして使います)。
-外の部品は、Go の標準ライブラリと、すでに使っている brotli だけです。
-`conformance/tools/bench` と `cpuprobe.sh` は、負荷をかけて、入り口のコンテナが使った CPU を 1 リクエストあたりで測ります (`cpuprobe.sh` の最後の引数で、負荷をかける側の CPU と workers を増やせます)。`coldpass` は、空のキャッシュに同じ URL を 1 回ずつ取って、元に聞きに行く経路の時間を測ります。
-これらの道具は、`docker build -f conformance/tools/Dockerfile -t toro-edge:tools .` で 1 つのイメージにできます。
+設定できる環境変数の名前と既定値の正本は [config.go](config.go) です。イメージは、試験に通ったものだけが GitHub のイメージ置き場 (GHCR) に置かれます。使うバージョンは [Releases](https://github.com/TORO-Server/TORO-Edge/releases) のタグを見てください。
+
+## 関連文書
+
+- 経路の決まり、挙動、作り、試験の詳細: [docs/design.md](docs/design.md)
+- サービス全体の構成と動かし方: [ServerImage-TORO の docs/architecture.md](https://github.com/TORO-Server/ServerImage-TORO/blob/main/docs/architecture.md)
