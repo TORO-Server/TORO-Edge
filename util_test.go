@@ -119,7 +119,7 @@ func TestRouteMatchers(t *testing.T) {
 	}
 }
 
-// /tiles/ と /mcassets/skin は、toro-webmap が見るものだけをクエリに残す (ほかを変えても別のものにならない)
+// /tiles/ と /mcassets/skin は、地図サーバー が見るものだけをクエリに残す (ほかを変えても別のものにならない)
 func TestQueryFilters(t *testing.T) {
 	tiles := map[string]string{
 		"":                       "",
@@ -157,21 +157,21 @@ func TestHasToken(t *testing.T) {
 }
 
 func TestApiBackendDefault(t *testing.T) {
-	// EDGE_API_BACKEND を決めなければ、api の振り分け先は MapWeb と同じ (現行どおり toro-webmap)
+	// EDGE_API_BACKEND を決めなければ、api の振り分け先は MapWeb と同じ (現行どおり、地図サーバー)
 	cfg := loadConfig(map[string]string{})
-	if cfg.ApiBackend != cfg.MapWeb || cfg.ApiBackend.Addr() != "toro-webmap:3000" {
+	if cfg.ApiBackend != cfg.MapWeb || cfg.ApiBackend.Addr() != "localhost:3000" {
 		t.Fatalf("default api backend = %v, map web = %v", cfg.ApiBackend, cfg.MapWeb)
 	}
 	cfg = loadConfig(map[string]string{"EDGE_MAPWEB": "example:4000"})
 	if cfg.ApiBackend != cfg.MapWeb {
 		t.Fatalf("api backend should follow EDGE_MAPWEB when unset: %v", cfg.ApiBackend)
 	}
-	cfg = loadConfig(map[string]string{"EDGE_API_BACKEND": "toro-api:8080"})
-	if cfg.ApiBackend.Addr() != "toro-api:8080" || cfg.MapWeb.Addr() != "toro-webmap:3000" {
+	cfg = loadConfig(map[string]string{"EDGE_API_BACKEND": "api.example.test:8080"})
+	if cfg.ApiBackend.Addr() != "api.example.test:8080" || cfg.MapWeb.Addr() != "localhost:3000" {
 		t.Fatalf("api backend = %v, map web = %v", cfg.ApiBackend, cfg.MapWeb)
 	}
-	cfg = loadConfig(map[string]string{"EDGE_API_BACKEND": "toro-api"})
-	if cfg.ApiBackend.Addr() != "toro-api:3000" {
+	cfg = loadConfig(map[string]string{"EDGE_API_BACKEND": "api.example.test"})
+	if cfg.ApiBackend.Addr() != "api.example.test:3000" {
 		t.Fatalf("port default: %v", cfg.ApiBackend)
 	}
 }

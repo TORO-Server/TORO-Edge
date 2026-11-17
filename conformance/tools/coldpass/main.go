@@ -1,6 +1,6 @@
 // 空のキャッシュに、同じ URL の一覧を 1 回ずつ取って、かかった時間を測る (元に聞きに行く経路。ヒットではない)。
 //
-// 使い方: coldpass --target toro-edge:80 --scenarios scenarios.json --only mix [--concurrency 8]
+// 使い方: coldpass --target localhost:80 --scenarios scenarios.json --only mix [--concurrency 8]
 //
 // 先に、キャッシュを空にしておく (POST /purge)
 package main
@@ -27,7 +27,7 @@ type scenario struct {
 }
 
 func main() {
-	target := flag.String("target", "toro-edge:80", "host:port")
+	target := flag.String("target", "localhost:80", "host:port")
 	scenariosFile := flag.String("scenarios", "scenarios.json", "scenario file")
 	concurrency := flag.Int("concurrency", 8, "concurrent requests")
 	only := flag.String("only", "mix", "scenario name substring")

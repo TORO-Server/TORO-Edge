@@ -20,7 +20,7 @@ func newBodyFile(b []byte) (*os.File, syscall.RawConn) {
 	if sysMemfdCreate == 0 {
 		return nil, nil
 	}
-	name, err := syscall.BytePtrFromString("toro-edge")
+	name, err := syscall.BytePtrFromString("edge")
 	if err != nil {
 		return nil, nil
 	}
@@ -28,7 +28,7 @@ func newBodyFile(b []byte) (*os.File, syscall.RawConn) {
 	if errno != 0 {
 		return nil, nil
 	}
-	f := os.NewFile(fd, "memfd:toro-edge")
+	f := os.NewFile(fd, "memfd:edge")
 	if f == nil {
 		syscall.Close(int(fd))
 		return nil, nil

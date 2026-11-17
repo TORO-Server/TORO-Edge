@@ -2,7 +2,7 @@
 //
 // 使い方 (Docker の minecraft-network の中で):
 //
-//	bench --target toro-edge:80 --label edge --scenarios scenarios.json [--seconds 8] [--connections 64] [--workers 2] [--only mix]
+//	bench --target localhost:80 --label edge --scenarios scenarios.json [--seconds 8] [--connections 64] [--workers 2] [--only mix]
 //
 // scenarios.json: [{ "name": "...", "host": "map.torosaba.net", "path": "/css/dynmap_style.css", "headers": { ... } }, ...]
 //
@@ -52,7 +52,7 @@ type result struct {
 }
 
 func main() {
-	target := flag.String("target", "toro-edge:80", "host:port")
+	target := flag.String("target", "localhost:80", "host:port")
 	label := flag.String("label", "", "label in the RESULT line (default: target)")
 	scenariosFile := flag.String("scenarios", "scenarios.json", "scenario file")
 	seconds := flag.Int("seconds", 8, "duration per scenario")
