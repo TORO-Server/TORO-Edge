@@ -368,17 +368,122 @@ func buildSites(d SiteDeps) *Sites {
 	// Tunnel が /map/* だけをここへ渡す (それ以外のパスは toro-api へ行き、ここには来ない)。来たら 404。
 	// BlueMap の決まりのように access-control-allow-origin を外さない (外すと、別オリジンの画面が読めない)
 	// 振り分け先は cfg.ApiBackend (既定は 地図サーバー。EDGE_API_BACKEND で別の API サーバーへ変える)。ためる場所 (名前の空間) は元を変えても同じ
-	// WebSocket は apiWSPaths の頭ごとに 1 本 (将来の /map3d/v1/ws もここへ足す)。WebSocket でない GET は 426
-	apiWSPaths := []string{"/map/v1/ws"}
+	// WebSocket は apiWSPaths の頭ごとに 1 本 (/map3d/v1/ws も同じ)。WebSocket でない GET は 426
+	apiWSPaths := []string{"/map/v1/ws", map3dPrefix + "ws"}
 	apiRules := slices.Concat([]Rule{deny}, dynmapAPI(d.apiBack, d.cache.space(), dynmapPaths{config: "/map/v1/configuration", world: "/map/v1/world/", tiles: "/map/v1/tiles/"}))
 	for _, p := range apiWSPaths {
 		apiRules = append(apiRules, exactRule(p, upgradeRequired))
 	}
+
+	// ───────────── api.torosaba.net の /map3d/v1/ (3D の地図の API。ブラウザは 3d-map.torosaba.net の画面から、別のオリジンとして読む)
+	// 元は /map/v1/ と同じ cfg.ApiBackend (toro-api)。頭を削らずに渡し、元の access-control-allow-origin を外さない・書き換えない。
+	// 知らないパスは元に聞かずに 404
+	ns3d := d.cache.space()
+	ns3dLive := d.cache.space()
+	api3d := func(mutate func(o *CachedOptions)) Handler { return proxiedVia(d.apiBack, ns3d, mutate) }
+	// 地図のデータ (タイル、テクスチャ、地図ごとの設定、プレイヤーの顔)。60 秒まとめる (Cloudflare の CDN-Cache-Control と同じ長さ)。404 と 204 は短く覚える
+	api3dData := api3d(func(o *CachedOptions) {
+		o.fixedTtl, o.swr, o.negativeTtl, o.tier, o.log = min, 30*sec, 5*sec, tierBest, false
+		o.response = ResponseRules{set: [][2]string{{"cdn-cache-control", "max-age=60"}}}
+	})
+	// マーカーとプレイヤーの位置: 1 秒だけまとめる。元が書く Cache-Control と CDN-Cache-Control は、ブラウザと Cloudflare に持たせない
+	api3dMarkers := api3d(func(o *CachedOptions) {
+		o.fixedTtl, o.swr, o.errorTtl, o.log = sec, sec, min, false
+		o.response = ResponseRules{hide: []string{"cdn-cache-control"}, cacheControl: "no-cache"}
+	})
+	api3dPlayers := cachedHandler(CachedOptions{
+		upstream:       d.apiBack,
+		cache:          ns3dLive,
+		key:            pathKey,
+		path:           pathOnly,
+		fixedTtl:       sec,
+		swr:            sec,
+		errorTtl:       10 * sec,
+		headerTimeout:  5 * time.Second,
+		tier:           tierFast,
+		maxEntityBytes: cfg.MaxEntityBytes,
+		log:            false,
+		response:       ResponseRules{hide: []string{"cdn-cache-control"}, cacheControl: "no-cache"},
+	})
+	api3dSSE := streamHandler(StreamOptions{
+		upstream:      d.apiBack,
+		path:          func(c *Ctx) (string, string) { return c.path, strings.TrimPrefix(c.search, "?") },
+		forward:       []hid{hAccept, hLastEventID, hOrigin},
+		headerTimeout: 10 * time.Second,
+		idleTimeout:   5 * time.Minute,
+		log:           true,
+		rules:         &ResponseRules{hide: []string{"cdn-cache-control"}, cacheControl: "no-cache"},
+		limit:         sseLimit,
+	})
+	// 看板の転送先の確認と中継。動画や生放送をそのまま流すので、ためずに渡す。
+	// 客の IP は Cloudflare が付けるもの (cf-connecting-ip) だけを X-Toro-Client-Ip で渡す (客が書いた X-Toro-Client-Ip は渡さない)
+	api3dSign := streamHandler(StreamOptions{
+		upstream: d.apiBack,
+		path:     func(c *Ctx) (string, string) { return c.path, strings.TrimPrefix(c.search, "?") },
+		forward:  []hid{hRange, hOrigin, hSecFetchSite},
+		set: func(c *Ctx) map[string]string {
+			if cf := c.req.h[hCfConnectingIP]; cf != "" {
+				return map[string]string{"X-Toro-Client-Ip": cf}
+			}
+			return nil
+		},
+		headerTimeout: 300 * time.Second,
+		idleTimeout:   300 * time.Second,
+		log:           true,
+		limit:         streamLimit,
+	})
+	// 看板のデータ (毎回確かめさせる)
+	api3dSignJSON := api3d(func(o *CachedOptions) {
+		o.fixedTtl, o.swr, o.log = 5*sec, 5*sec, false
+		o.response = ResponseRules{cacheControl: "no-cache"}
+	})
+	// プレイヤーの頭のスキンの URL。クエリは name と uuid だけを見る
+	api3dSkin := api3d(func(o *CachedOptions) {
+		o.key = func(c *Ctx) string { return "skin?" + skinQuery(c.search) }
+		o.path = func(c *Ctx) (string, string) { return c.path, skinQuery(c.search) }
+		o.maxTtl, o.negativeTtl, o.tier = day, 5*sec, tierBest
+	})
+	// 構造物の看板のブロックの形とテクスチャ。Cache-Control のとおりためる (最大 1 日)
+	api3dAssets := api3d(func(o *CachedOptions) {
+		o.maxTtl, o.negativeTtl, o.tier = day, 5*sec, tierBest
+	})
+	apiRules = append(apiRules, prefixRule(map3dPrefix, func(c *Ctx) {
+		switch map3dRoute(c.path) {
+		case m3Data:
+			api3dData(c)
+		case m3Markers:
+			api3dMarkers(c)
+		case m3Players:
+			api3dPlayers(c)
+		case m3SSE:
+			api3dSSE(c)
+		case m3Sign:
+			api3dSign(c)
+		case m3SignJSON:
+			api3dSignJSON(c)
+		case m3Skin:
+			api3dSkin(c)
+		case m3Assets:
+			api3dAssets(c)
+		default:
+			notFound(c)
+		}
+	}))
+	// preflight (OPTIONS) は元が答える (Access-Control-Allow-Origin と Allow-Headers の Range などは元の値をそのまま返す)
+	api3dOptions := streamHandler(StreamOptions{
+		upstream:      d.apiBack,
+		path:          func(c *Ctx) (string, string) { return c.path, strings.TrimPrefix(c.search, "?") },
+		forward:       []hid{hOrigin, hACRMethod, hACRHeaders},
+		headerTimeout: 10 * time.Second,
+		idleTimeout:   10 * time.Second,
+		log:           false,
+		limit:         streamLimit,
+	})
 	apiRules = append(apiRules, prefixRule("/", notFound))
 	mapSite := &Site{name: "map", wsPaths: []string{"/up/ws"}, wsTarget: cfg.MapWeb, route: compileRules(mapRules)}
 	blueSite := &Site{name: "bluemap", wsPaths: []string{"/up/ws"}, wsTarget: cfg.MapWeb, route: compileRules(blueRules)}
 	assetSite := &Site{name: "assets", route: compileRules(assetRules)}
-	apiSite := &Site{name: "api", wsPaths: apiWSPaths, wsTarget: cfg.ApiBackend, route: compileRules(apiRules)}
+	apiSite := &Site{name: "api", wsPaths: apiWSPaths, wsTarget: cfg.ApiBackend, route: compileRules(apiRules), optionsPrefix: map3dPrefix, options: api3dOptions}
 
 	byHost := map[string]*Site{}
 	for _, h := range cfg.HostsMap {

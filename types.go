@@ -33,6 +33,8 @@ const (
 	hConnection
 	hContentLength
 	hTransferEncoding
+	hACRMethod
+	hACRHeaders
 	numHdr
 )
 
@@ -41,7 +43,7 @@ var hdrNames = [numHdr]string{
 	"Host", "Accept-Encoding", "If-None-Match", "If-Modified-Since", "Range", "If-Range", "Origin", "Referer", "Sec-Fetch-Site",
 	"Cf-Connecting-Ip", "X-Forwarded-For", "X-Forwarded-Proto", "User-Agent", "Accept", "Last-Event-Id",
 	"Sec-Websocket-Key", "Sec-Websocket-Version", "Sec-Websocket-Protocol", "Sec-Websocket-Extensions", "Upgrade", "Connection",
-	"Content-Length", "Transfer-Encoding",
+	"Content-Length", "Transfer-Encoding", "Access-Control-Request-Method", "Access-Control-Request-Headers",
 }
 
 // hdrIDs は小文字の名前から hid を引く
@@ -113,6 +115,9 @@ type Site struct {
 	// WebSocket を渡す先
 	wsTarget Endpoint
 	route    func(path string, c *Ctx) Handler
+	// OPTIONS (CORS の preflight) を元に渡すパスの頭と、その処理。空ならこのサイトの OPTIONS は 405
+	optionsPrefix string
+	options       Handler
 }
 
 // Rule は経路の 1 つ。exact / prefix / fn のどれか 1 つを使う。fn は合えば、取り出した部分 (なければ "") と true を返す

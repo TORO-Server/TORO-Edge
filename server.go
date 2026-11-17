@@ -130,6 +130,11 @@ func (e *Edge) handle(c *Ctx) {
 		proxyUpgrade(c, site.wsTarget, c.path+c.search)
 		return
 	}
+	// CORS の preflight: 許す元のサイトの、決めたパスの下だけ元へ渡す
+	if c.method == "OPTIONS" && site.options != nil && strings.HasPrefix(c.path, site.optionsPrefix) && !denyPath(c.path) {
+		site.options(c)
+		return
+	}
 	if c.method != "GET" && c.method != "HEAD" {
 		sendText(c, http.StatusMethodNotAllowed, "Method Not Allowed\n", "Allow", "GET, HEAD")
 		return
