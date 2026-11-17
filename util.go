@@ -337,3 +337,85 @@ func hasToken(v, tok string) bool {
 	}
 	return false
 }
+
+// api.torosaba.net の /map3d/v1/ (3D の地図の API) の頭
+const map3dPrefix = "/map3d/v1/"
+
+// map3dRoute が返す、/map3d/v1/ 以下の使い道
+type map3dKind int
+
+const (
+	m3None     map3dKind = iota
+	m3Data               // maps/<地図>/tiles/、settings.json、textures.json、assets/
+	m3Markers            // maps/<地図>/live/markers.json
+	m3Players            // maps/<地図>/live/players.json
+	m3SSE                // maps/<地図>/live/sse
+	m3Sign               // marumasign/resolve、marumasign/proxy
+	m3SignJSON           // marumasign/<地図>.json
+	m3Skin               // mcassets/skin
+	m3Assets             // mcassets/index.json、mcassets/<hash>/...
+)
+
+// isMapID は地図の ID か ([\w.-]{1,64})
+func isMapID(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9') && c != '_' && c != '.' && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// map3dRoute は /map3d/v1/ 以下のパスの使い道を決める。知らないパスは m3None (404)
+func map3dRoute(path string) map3dKind {
+	rest, ok := strings.CutPrefix(path, map3dPrefix)
+	if !ok {
+		return m3None
+	}
+	switch {
+	case strings.HasPrefix(rest, "maps/"):
+		id, tail, ok := strings.Cut(rest[len("maps/"):], "/")
+		if !ok || !isMapID(id) || id == "." || id == ".." {
+			return m3None
+		}
+		switch tail {
+		case "settings.json", "textures.json":
+			return m3Data
+		case "live/markers.json":
+			return m3Markers
+		case "live/players.json":
+			return m3Players
+		case "live/sse":
+			return m3SSE
+		}
+		for _, pre := range []string{"tiles/", "assets/"} {
+			if len(tail) > len(pre) && strings.HasPrefix(tail, pre) {
+				return m3Data
+			}
+		}
+	case strings.HasPrefix(rest, "marumasign/"):
+		name := rest[len("marumasign/"):]
+		if name == "resolve" || name == "proxy" {
+			return m3Sign
+		}
+		if id, ok := strings.CutSuffix(name, ".json"); ok && isMapID(id) {
+			return m3SignJSON
+		}
+	case strings.HasPrefix(rest, "mcassets/"):
+		name := rest[len("mcassets/"):]
+		if name == "skin" {
+			return m3Skin
+		}
+		if name == "index.json" {
+			return m3Assets
+		}
+		if h, tail, ok := strings.Cut(name, "/"); ok && h != "" && tail != "" {
+			return m3Assets
+		}
+	}
+	return m3None
+}

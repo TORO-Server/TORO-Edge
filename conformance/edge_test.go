@@ -1307,3 +1307,164 @@ func TestApiBackendEnv(t *testing.T) {
 		eq(t, e.api("/map/v1/ws").status, 426)
 	})
 }
+
+func TestApiMap3d(t *testing.T) {
+	// api.torosaba.net の /map3d/v1/ は toro-api (EDGE_API_BACKEND) へ、頭を削らずに渡す。元の Access-Control-Allow-Origin は外さない・書き換えない
+	withEnv(t, overrides{apiBackend: true}, func(e *env) {
+		e.apiback.setHandler(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "OPTIONS" {
+				sendText(w, 204, hdr("access-control-allow-origin", "https://3d-map.torosaba.net", "access-control-allow-headers", "Range, Content-Type", "access-control-expose-headers", "Content-Range, Accept-Ranges"), "")
+				return
+			}
+			sendText(w, 200, hdr("content-type", "application/json", "access-control-allow-origin", "https://3d-map.torosaba.net", "cache-control", "public, max-age=3600"), `{"ok":true}`)
+		})
+		const acao = "https://3d-map.torosaba.net"
+		last := func() seenReq { return e.apiback.seenAt(-1) }
+
+		// E3: 地図のデータ。60 秒まとめる (CDN-Cache-Control)。ACAO は元のまま
+		for i, p := range []string{
+			"/map3d/v1/maps/overworld/settings.json",
+			"/map3d/v1/maps/overworld/textures.json",
+			"/map3d/v1/maps/overworld/tiles/0/x-3/7/0/z-3/9/3.prbm",
+			"/map3d/v1/maps/overworld/tiles/1/x0/z0.png",
+			"/map3d/v1/maps/overworld/assets/playerheads/00000000-0000-0000-0000-000000000000.png",
+		} {
+			r := e.api(p)
+			eq(t, r.status, 200, p)
+			eq(t, r.h("Access-Control-Allow-Origin"), acao, p)
+			eq(t, r.h("CDN-Cache-Control"), "max-age=60", p)
+			eq(t, last().URL, p)
+			eq(t, e.apiback.seenLen(), i+1, p)
+		}
+		// 同じものを続けて読んでも、元へは 1 回だけ (まとめる)
+		e.api("/map3d/v1/maps/overworld/settings.json")
+		eq(t, e.apiback.seenLen(), 5)
+
+		// E4: ライブ情報 (1 秒まとめ、Cache-Control は no-cache)。クエリは渡す
+		for _, p := range []string{"/map3d/v1/maps/overworld/live/markers.json", "/map3d/v1/maps/overworld/live/players.json"} {
+			r := e.api(p)
+			eq(t, r.status, 200, p)
+			eq(t, r.h("Access-Control-Allow-Origin"), acao, p)
+			eq(t, r.h("Cache-Control"), "no-cache", p)
+			eq(t, last().URL, p)
+		}
+
+		// E5: 看板。Range / Origin / Sec-Fetch-Site を渡し、cf-connecting-ip を X-Toro-Client-Ip で渡す。客が書いた X-Toro-Client-Ip は渡さない
+		n := e.apiback.seenLen()
+		r := e.api("/map3d/v1/marumasign/proxy?u=https%3A%2F%2Fexample.com%2Fa.mp4&p=1", reqOpts{headers: hdr(
+			"Range", "bytes=0-9", "Origin", acao, "Sec-Fetch-Site", "cross-site", "CF-Connecting-IP", "203.0.113.7", "X-Toro-Client-IP", "198.51.100.1")})
+		eq(t, r.status, 200)
+		eq(t, r.h("Access-Control-Allow-Origin"), acao)
+		s := last()
+		eq(t, e.apiback.seenLen(), n+1)
+		eq(t, s.URL, "/map3d/v1/marumasign/proxy?u=https%3A%2F%2Fexample.com%2Fa.mp4&p=1")
+		eq(t, s.Header.Get("Range"), "bytes=0-9")
+		eq(t, s.Header.Get("Origin"), acao)
+		eq(t, s.Header.Get("Sec-Fetch-Site"), "cross-site")
+		eq(t, s.Header.Get("X-Toro-Client-Ip"), "203.0.113.7")
+		r = e.api("/map3d/v1/marumasign/resolve?u=https%3A%2F%2Fexample.com%2F&p=1", reqOpts{headers: hdr("CF-Connecting-IP", "203.0.113.8")})
+		eq(t, r.status, 200)
+		eq(t, last().Header.Get("X-Toro-Client-Ip"), "203.0.113.8")
+		// Cloudflare の頭書きがなければ、客が書いても渡さない
+		e.api("/map3d/v1/marumasign/resolve?u=x", reqOpts{headers: hdr("X-Toro-Client-IP", "198.51.100.1")})
+		eq(t, last().Header.Get("X-Toro-Client-Ip"), "")
+		// 地図ごとの JSON は no-cache
+		r = e.api("/map3d/v1/marumasign/overworld.json")
+		eq(t, r.status, 200)
+		eq(t, r.h("Cache-Control"), "no-cache")
+		eq(t, r.h("Access-Control-Allow-Origin"), acao)
+		eq(t, last().URL, "/map3d/v1/marumasign/overworld.json")
+
+		// E6: mcassets。skin はクエリのうち name と uuid だけ
+		r = e.api("/map3d/v1/mcassets/skin?name=Steve&x=1&uuid=abc")
+		eq(t, r.status, 200)
+		eq(t, r.h("Access-Control-Allow-Origin"), acao)
+		eq(t, last().URL, "/map3d/v1/mcassets/skin?name=Steve&uuid=abc")
+		eq(t, e.api("/map3d/v1/mcassets/index.json").status, 200)
+		eq(t, last().URL, "/map3d/v1/mcassets/index.json")
+		r = e.api("/map3d/v1/mcassets/0123abcd/assets.json")
+		eq(t, r.status, 200)
+		eq(t, r.h("Access-Control-Allow-Origin"), acao)
+		eq(t, last().URL, "/map3d/v1/mcassets/0123abcd/assets.json")
+
+		// OPTIONS (preflight) は元が答える。Range を許す頭書きと ACAO は元のまま
+		n = e.apiback.seenLen()
+		r = e.api("/map3d/v1/marumasign/proxy", reqOpts{method: "OPTIONS", headers: hdr("Origin", acao, "Access-Control-Request-Method", "GET", "Access-Control-Request-Headers", "range")})
+		eq(t, r.status, 204)
+		eq(t, r.h("Access-Control-Allow-Origin"), acao)
+		eq(t, r.h("Access-Control-Allow-Headers"), "Range, Content-Type")
+		eq(t, r.h("Access-Control-Expose-Headers"), "Content-Range, Accept-Ranges")
+		eq(t, e.apiback.seenLen(), n+1)
+		eq(t, last().Header.Get("Access-Control-Request-Headers"), "range")
+		eq(t, last().Header.Get("Access-Control-Request-Method"), "GET")
+		// /map3d/v1/ の外の OPTIONS は今までどおり 405 (元へ行かない)
+		eq(t, e.api("/map/v1/configuration", reqOpts{method: "OPTIONS"}).status, 405)
+		eq(t, e.api("/other", reqOpts{method: "OPTIONS"}).status, 405)
+		eq(t, e.get("/map3d/v1/maps/overworld/settings.json", reqOpts{method: "OPTIONS"}).status, 405)
+		eq(t, e.apiback.seenLen(), n+1)
+
+		// 知らないパスは、元に聞かずに 404
+		n = e.apiback.seenLen()
+		for _, p := range []string{
+			"/map3d/v1", "/map3d/v1/", "/map3d/v1/other", "/map3d/v1/maps/overworld", "/map3d/v1/maps/overworld/", "/map3d/v1/maps/overworld/other.json",
+			"/map3d/v1/maps/overworld/tiles/", "/map3d/v1/maps/overworld/live/other", "/map3d/v1/maps/overworld/live/",
+			"/map3d/v1/maps/a%20b/settings.json", "/map3d/v1/maps//settings.json", "/map3d/v1/maps/../settings.json",
+			"/map3d/v1/marumasign/", "/map3d/v1/marumasign/a/b.json", "/map3d/v1/marumasign/x.txt", "/map3d/v1/marumasign/resolve/x",
+			"/map3d/v1/mcassets/", "/map3d/v1/mcassets/abc", "/map3d/v1/mcassets/abc/",
+			"/map3d/v1/live/clients", "/map3d/v1/x.php", "/map3d/v1/maps/overworld/.git/x",
+		} {
+			eq(t, e.api(p).status, 404, p)
+		}
+		eq(t, e.apiback.seenLen(), n)
+		// 3d-map.torosaba.net と map.torosaba.net は /map3d/v1/ を持たない (今までの規則のまま)
+		eq(t, e.get("/map3d/v1/maps/overworld/settings.json").status, 404)
+		eq(t, e.apiback.seenLen(), n)
+
+		// /map/v1/ は今までどおり
+		r = e.api("/map/v1/configuration")
+		eq(t, r.status, 200)
+		eq(t, last().URL, "/map/v1/configuration")
+		eq(t, e.api("/map/v1/other").status, 404)
+	})
+}
+
+func TestApiMap3dWebSocket(t *testing.T) {
+	// /map3d/v1/ws は Upgrade を toro-api へ渡す。WebSocket でない GET は 426。api 以外のホストは 404
+	withEnv(t, overrides{apiBackend: true}, func(e *env) {
+		e.apiback.setHandler(e.apiback.echoUpgrade)
+		conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(e.edge.port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(10 * time.Second))
+		fmt.Fprintf(conn, "GET /map3d/v1/ws HTTP/1.1\r\nHost: api.torosaba.net\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: https://3d-map.torosaba.net\r\n\r\n")
+		br := bufio.NewReader(conn)
+		res, err := http.ReadResponse(br, &http.Request{Method: "GET"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		eq(t, res.StatusCode, 101)
+		msg := "hello through map3d"
+		conn.Write([]byte(msg))
+		echoed := make([]byte, len(msg))
+		if _, err := io.ReadFull(br, echoed); err != nil {
+			t.Fatal(err)
+		}
+		eq(t, string(echoed), msg)
+		conn.Close()
+		seen := e.apiback.seenAt(0)
+		eq(t, seen.URL, "/map3d/v1/ws")
+		eq(t, seen.Header.Get("Origin"), "https://3d-map.torosaba.net")
+
+		for _, c := range [][2]string{{"/map3d/v1/other", "api.torosaba.net"}, {"/map3d/v1/ws", "map.torosaba.net"}, {"/map3d/v1/ws", "3d-map.torosaba.net"}, {"/map3d/v1/ws", "assets.torosaba.net"}} {
+			r, err := request(e.edge.port, c[0], reqOpts{host: c[1], headers: hdr("connection", "Upgrade", "upgrade", "websocket")})
+			if err != nil {
+				t.Fatalf("%s%s: %v", c[1], c[0], err)
+			}
+			eq(t, r.status, 404, c[1]+c[0])
+		}
+		eq(t, e.api("/map3d/v1/ws").status, 426)
+		eq(t, e.apiback.seenLen(), 1)
+	})
+}
