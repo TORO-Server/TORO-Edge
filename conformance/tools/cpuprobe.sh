@@ -1,13 +1,13 @@
 #!/bin/sh
 # usage: cpuprobe.sh <container> <host:port> <scenario substring> [connections] [client cpus (= workers)]
 # 1 リクエストあたりに、入り口のコンテナが使った CPU (cgroup の usage_usec) を測る。負荷をかける側の CPU は含まない
-# 先に、道具のイメージを作っておく: docker build -f conformance/tools/Dockerfile -t toro-edge:tools .  (リポジトリの直下から)
+# 先に、道具のイメージを作っておく: docker build -f conformance/tools/Dockerfile -t edge-tools .  (リポジトリの直下から)
 ID=$(docker inspect -f '{{.Id}}' "$1")
 F=/sys/fs/cgroup/system.slice/docker-$ID.scope/cpu.stat
 [ -f "$F" ] || F=/sys/fs/cgroup/docker/$ID/cpu.stat
 cpu() { awk '/^usage_usec/{print $2}' "$F"; }
 before=$(cpu)
-out=$(docker run --rm --network minecraft-network --cpus "${5:-2}" --cpu-shares 128 -v /tmp/scenarios.json:/s.json:ro toro-edge:tools \
+out=$(docker run --rm --network minecraft-network --cpus "${5:-2}" --cpu-shares 128 -v /tmp/scenarios.json:/s.json:ro edge-tools \
   /bench --target "$2" --scenarios /s.json --seconds 5 --connections "${4:-32}" --workers "${5:-2}" --only "$3" 2>&1)
 after=$(cpu)
 total=$(echo "$out" | grep '^RESULT' | sed 's/.*"total":\([0-9]*\).*/\1/')

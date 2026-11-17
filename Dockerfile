@@ -1,6 +1,6 @@
-# toro-edge: map.torosaba.net / 3d-map.torosaba.net / assets.torosaba.net の入り口 (自前のリバースプロキシ)
+# 入り口のプロキシ: map.torosaba.net / 3d-map.torosaba.net / assets.torosaba.net の入り口 (自前のリバースプロキシ)
 #
-#   docker build -t toro-edge .
+#   docker build -t edge .
 #   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<owner>/toro-edge .
 #
 # ビルドは常にビルドする側の CPU で行い (--platform=$BUILDPLATFORM)、Go の交差コンパイルで amd64 / arm64 を作る

@@ -44,7 +44,7 @@ func replaceOnce(id, search, replacement string) *Transform {
 }
 
 var (
-	// Dynmap の前の画面 (index.html)。軽くするスクリプト (TORO-WebMap の client/dynmap-client.ts) を、Dynmap の js を読み終えたところに差し込む。
+	// Dynmap の前の画面 (index.html)。軽くするスクリプト (地図サーバー の client/dynmap-client.ts) を、Dynmap の js を読み終えたところに差し込む。
 	// Cloudflare がブラウザに 4 時間持たせるので、スクリプトを変えたら ?v= の数を上げる
 	transformLegacy = replaceOnce("legacy", `<script type="text/javascript" src="standalone/config.js`,
 		"<script type=\"text/javascript\" src=\"toro/dynmap-client.js?v=2\"></script>\n\t<script type=\"text/javascript\" src=\"standalone/config.js")
@@ -102,7 +102,7 @@ func buildSites(d SiteDeps) *Sites {
 	pathKey := func(c *Ctx) string { return c.path }
 	pathOnly := func(c *Ctx) (string, string) { return c.path, "" }
 
-	// proxied は toro-webmap (Nuxt) の返事をためて返す。クエリを使うものは key と path を決める
+	// proxied は 地図サーバー (Nuxt) の返事をためて返す。クエリを使うものは key と path を決める
 	proxiedVia := func(up *Upstream, ns *nsCache, mutate func(o *CachedOptions)) Handler {
 		o := CachedOptions{
 			upstream:       up,
@@ -131,8 +131,8 @@ func buildSites(d SiteDeps) *Sites {
 	}
 
 	// ───────────── Dynmap の API (設定、ワールドの更新、タイル)。map.torosaba.net の /up/ と /tiles/、api.torosaba.net の /map/v1/ で、パスの頭だけが違う。
-	// どちらも元 (toro-webmap) へ、客が来たパスのまま聞く (頭を削らない)。toro-webmap が付ける Access-Control-Allow-Origin は、そのまま返す
-	// up は元 (map.torosaba.net は toro-webmap、api.torosaba.net は ApiBackend)
+	// どちらも元 (地図サーバー) へ、客が来たパスのまま聞く (頭を削らない)。地図サーバー が付ける Access-Control-Allow-Origin は、そのまま返す
+	// up は元 (map.torosaba.net は 地図サーバー、api.torosaba.net は ApiBackend)
 	dynmapAPI := func(up *Upstream, ns *nsCache, p dynmapPaths) []Rule {
 		return []Rule{
 			// 設定とワールドの更新。全員が 2 秒ごとに読むので、ワールドごとに 1 秒だけまとめる (中身は時刻によらず同じ)
@@ -146,7 +146,7 @@ func buildSites(d SiteDeps) *Sites {
 				o.path = func(c *Ctx) (string, string) { return p.world + c.cap + "/0", "" }
 				o.fixedTtl, o.swr, o.negativeTtl = sec, 2*sec, 2*sec
 			})),
-			// 地図のタイル、マーカー、プレイヤーの顔。キャッシュの長さは toro-webmap の Cache-Control に従う (なければ 5 分)
+			// 地図のタイル、マーカー、プレイヤーの顔。キャッシュの長さは 地図サーバー の Cache-Control に従う (なければ 5 分)
 			// 描き直したタイルは ?timestamp= で別の URL になる (クエリはこれだけを見る)
 			prefixRule(p.tiles, proxiedVia(up, ns, func(o *CachedOptions) {
 				o.key = func(c *Ctx) string {
@@ -166,7 +166,7 @@ func buildSites(d SiteDeps) *Sites {
 
 	mapRules := slices.Concat([]Rule{
 		deny,
-		// 地図の画面は toro-webmap (TORO-WebMap の app/、Nuxt) が返す
+		// 地図の画面は 地図サーバー (地図サーバー の app/、Nuxt) が返す
 		exactRule("/", proxied(nsMap, func(o *CachedOptions) {
 			o.fixedTtl, o.swr = 10*sec, min
 			o.response = ResponseRules{cacheControl: "no-cache", set: [][2]string{{"content-language", "ja"}}}
@@ -176,7 +176,7 @@ func buildSites(d SiteDeps) *Sites {
 		})),
 		// 前の画面へのリンク (index.html?worldname=...) は新しい画面へ
 		exactRule("/index.html", redirectToRoot),
-		// ホーム画面に追加するための Service Worker (TORO-WebMap の client/sw.ts) と、アイコンなど (TORO-WebMap の public/pwa/)。
+		// ホーム画面に追加するための Service Worker (地図サーバー の client/sw.ts) と、アイコンなど (地図サーバー の public/pwa/)。
 		// Service Worker は更新がすぐ届くよう、毎回確かめさせる
 		exactRule("/sw.js", proxied(nsMap, func(o *CachedOptions) {
 			o.fixedTtl, o.swr = 10*sec, 30*sec
@@ -207,7 +207,7 @@ func buildSites(d SiteDeps) *Sites {
 	blueNoCache := newStaticRules(append([][2]string{{"cache-control", "no-cache"}}, blueMapHeaders...)...)
 	blueStatic := newStaticRules(append([][2]string{{"cache-control", "public, max-age=86400, stale-if-error=604800"}, {"cdn-cache-control", "max-age=60"}}, blueMapHeaders...)...)
 
-	// toro-main の再起動中は、BlueMap が DB に書いた最後の版を返す (toro-webmap 経由)。ここは Cloudflare にもためさせない
+	// ゲームサーバー の再起動中は、BlueMap が DB に書いた最後の版を返す (地図サーバー 経由)。ここは Cloudflare にもためさせない
 	liveFallback := proxied(nsBlueFallback, func(o *CachedOptions) {
 		o.fixedTtl, o.swr, o.errorTtl, o.log = sec, sec, min, false
 		o.response = ResponseRules{hide: []string{"access-control-allow-origin"}, cacheControl: "no-cache", set: blueMapHeaders}
@@ -227,7 +227,7 @@ func buildSites(d SiteDeps) *Sites {
 		tier:    tierFast,
 	})
 
-	// マーカー。toro-webmap が BlueMap のマーカーに Dynmap の地点 (一覧にだけ出す) を足して返す
+	// マーカー。地図サーバー が BlueMap のマーカーに Dynmap の地点 (一覧にだけ出す) を足して返す
 	markers := proxied(nsBlue, func(o *CachedOptions) {
 		o.fixedTtl, o.swr, o.errorTtl, o.log = sec, sec, min, false
 		o.response = ResponseRules{hide: []string{"access-control-allow-origin"}, cacheControl: "no-cache", set: blueMapHeaders}
@@ -245,7 +245,7 @@ func buildSites(d SiteDeps) *Sites {
 		limit:         sseLimit,
 	})
 	// ライブ情報 (プレイヤーの位置など) は BlueMap 内蔵の Web サーバーに聞く。BlueMap は max-age=86400 を付けて返すので、ブラウザに持たせない。
-	// 見ている人の数だけ聞くと toro-main に響くので、1 秒だけまとめる
+	// 見ている人の数だけ聞くと ゲームサーバー に響くので、1 秒だけまとめる
 	live := cachedHandler(CachedOptions{
 		upstream:       d.live,
 		cache:          nsBlueLive,
@@ -270,8 +270,8 @@ func buildSites(d SiteDeps) *Sites {
 
 	blueRules := []Rule{
 		deny,
-		// /maps/<地図>/live/ はライブ情報 (markers.json は toro-webmap、sse は流す、players.json は BlueMap 本体)。それ以外は地図のデータ。
-		// ライブ情報はためきれないものが toro-main に届くので、知らない地図や知らない名前は聞きに行かない
+		// /maps/<地図>/live/ はライブ情報 (markers.json は 地図サーバー、sse は流す、players.json は BlueMap 本体)。それ以外は地図のデータ。
+		// ライブ情報はためきれないものが ゲームサーバー に届くので、知らない地図や知らない名前は聞きに行かない
 		prefixRule("/maps/", func(c *Ctx) {
 			if id, rest, ok := mapsLive(c.path); ok {
 				if !d.blueMapStatic.knownMap(id) {
@@ -292,7 +292,7 @@ func buildSites(d SiteDeps) *Sites {
 			}
 			mapData(c)
 		}),
-		// 画面は toro-webmap (TORO-WebMap の app/bluemap/、BlueMap の webapp を Nuxt と TypeScript にしたもの) が返す
+		// 画面は 地図サーバー (地図サーバー の app/bluemap/、BlueMap の webapp を Nuxt と TypeScript にしたもの) が返す
 		exactRule("/", proxied(nsBlue, func(o *CachedOptions) {
 			o.fixedTtl, o.swr = 10*sec, min
 			o.response = ResponseRules{cacheControl: "no-cache", set: append(append([][2]string{}, blueMapHeaders...), [2]string{"content-language", "ja"})}
@@ -316,8 +316,8 @@ func buildSites(d SiteDeps) *Sites {
 		}, staticHandler(d.blueMapStatic, blueNoCache, staticOptions{})),
 		exactRule("/settings.json", staticHandler(d.blueMapStatic, blueNoCache, staticOptions{transform: transformSettings})),
 		exactRule("/toro-refresh.js", func(c *Ctx) { c.cache = "HIT"; sendEntity(c, toroRefreshEntity) }),
-		// MarumaSign の看板の、転送の行き先を調べるものと CORS のないサイトの中継 (toro-webmap は看板データにある URL とそこからたどれるものだけを読む)。
-		// 動画や生放送をそのまま流すので、ためずに渡す。安全のための頭書き (CSP の sandbox など) は toro-webmap が付ける
+		// MarumaSign の看板の、転送の行き先を調べるものと CORS のないサイトの中継 (地図サーバー は看板データにある URL とそこからたどれるものだけを読む)。
+		// 動画や生放送をそのまま流すので、ためずに渡す。安全のための頭書き (CSP の sandbox など) は 地図サーバー が付ける
 		prefixRule("/_marumasign/", streamHandler(StreamOptions{
 			upstream:      d.mapWeb,
 			path:          func(c *Ctx) (string, string) { return c.path, strings.TrimPrefix(c.search, "?") },
@@ -334,7 +334,7 @@ func buildSites(d SiteDeps) *Sites {
 			o.maxTtl, o.negativeTtl, o.tier = day, 5*sec, tierBest
 			o.response = ResponseRules{set: blueMapHeaders}
 		})),
-		// 構造物の看板のブロックの形とテクスチャ (toro-webmap がクライアントの jar から作る)。Cache-Control のとおりためる
+		// 構造物の看板のブロックの形とテクスチャ (地図サーバー がクライアントの jar から作る)。Cache-Control のとおりためる
 		prefixRule("/mcassets/", proxied(nsBlue, func(o *CachedOptions) {
 			o.maxTtl, o.negativeTtl, o.tier = day, 5*sec, tierBest
 			o.response = ResponseRules{set: blueMapHeaders}
@@ -343,7 +343,7 @@ func buildSites(d SiteDeps) *Sites {
 	}
 
 	// ───────────── assets.torosaba.net (MarumaSign Companion がホストした看板の画像など)
-	// 読めるかどうかは toro-webmap が毎回確かめる (遊んでいる人の IP か、地図のページから) ので、ここではためない
+	// 読めるかどうかは 地図サーバー が毎回確かめる (遊んでいる人の IP か、地図のページから) ので、ここではためない
 	assetRules := []Rule{
 		fnRule(assetFile, streamHandler(StreamOptions{
 			upstream: d.mapWeb,
@@ -367,7 +367,7 @@ func buildSites(d SiteDeps) *Sites {
 	// ───────────── api.torosaba.net の /map/v1/ (Dynmap の API。ブラウザは map.torosaba.net の画面から、別のオリジンとして読む)
 	// Tunnel が /map/* だけをここへ渡す (それ以外のパスは toro-api へ行き、ここには来ない)。来たら 404。
 	// BlueMap の決まりのように access-control-allow-origin を外さない (外すと、別オリジンの画面が読めない)
-	// 振り分け先は cfg.ApiBackend (既定は toro-webmap。EDGE_API_BACKEND で toro-api などへ変える)。ためる場所 (名前の空間) は元を変えても同じ
+	// 振り分け先は cfg.ApiBackend (既定は 地図サーバー。EDGE_API_BACKEND で別の API サーバーへ変える)。ためる場所 (名前の空間) は元を変えても同じ
 	// WebSocket は apiWSPaths の頭ごとに 1 本 (将来の /map3d/v1/ws もここへ足す)。WebSocket でない GET は 426
 	apiWSPaths := []string{"/map/v1/ws"}
 	apiRules := slices.Concat([]Rule{deny}, dynmapAPI(d.apiBack, d.cache.space(), dynmapPaths{config: "/map/v1/configuration", world: "/map/v1/world/", tiles: "/map/v1/tiles/"}))
