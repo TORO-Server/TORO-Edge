@@ -58,7 +58,7 @@ go build -o toro-edge .
 cd conformance && EDGE_BIN=../toro-edge go test -count=1 .   # 偽の元のサーバーを相手にした試験
 ```
 
-`conformance` の試験は実装の言語に依らず、`EDGE_BIN` に実行ファイルを渡すだけで流せます (省略すると、リポジトリの直下をビルドして使います)。
+`conformance` の試験は実装の言語に依らず、`EDGE_BIN` に実行ファイルを渡すだけで流せます (省略すると、置き場の直下をビルドして使います)。
 外の部品は、Go の標準ライブラリと、すでに使っている brotli だけです。
 `conformance/tools/bench` と `cpuprobe.sh` は、負荷をかけて、入り口のコンテナが使った CPU を 1 リクエストあたりで測ります (`cpuprobe.sh` の最後の引数で、負荷をかける側の CPU と workers を増やせます)。`coldpass` は、空のキャッシュに同じ URL を 1 回ずつ取って、元に聞きに行く経路の時間を測ります。
 これらの道具は、`docker build -f conformance/tools/Dockerfile -t toro-edge:tools .` で 1 つのイメージにできます。
