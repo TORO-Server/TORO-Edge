@@ -13,6 +13,7 @@
 - `proxied(...)` の鍵と元に聞く URL はパスだけ。クエリを見るのは `/tiles/` の `timestamp` と `/mcassets/skin` の `name` と `uuid` だけ
 - `/up/world/<ワールド>/<数字>` のほかは 404。元には `/up/world/<ワールド>/0` で聞く
 - API 用のホストは `/map/v1/` の `configuration` `world/<ワールド>/<数字>` `tiles/` `ws` だけ (map ホストの `/up/` `/tiles/` と同じ決まりで、元には `/map/v1/` の頭を削らずに聞く)。`Access-Control-Allow-Origin` は元のものをそのまま返す。ほかのパスは 404 (公開の設定は TORO-WebMap の `docs/map-deployment.md` が正本)
+- API 用のホストの元は環境変数 `EDGE_API_BACKEND` (`host:port`) で決める。決めなければ `EDGE_MAPWEB` と同じ (toro-webmap) で、決めたときだけ `/map/v1/` の HTTP と WebSocket がそちらへ行く (map ホストと 3d-map ホストは toro-webmap のまま)。WebSocket のパスはサイトごとに複数持てる (`Site.wsPaths`)
 - `/maps/<地図>/live/` は `players.json` `markers.json` `sse` だけで、地図は BlueMap の `settings.json` の `maps` にあるものだけ (読めないときは止めない)
 
 ### 挙動
