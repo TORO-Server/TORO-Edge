@@ -370,6 +370,19 @@ func isMapID(s string) bool {
 	return true
 }
 
+// map3dTile は /map3d/v1/maps/<地図>/tiles/<何か> か (3D のタイル。assets ホストが受けるのはこれだけ)
+func map3dTile(path string) bool {
+	rest, ok := strings.CutPrefix(path, map3dPrefix+"maps/")
+	if !ok {
+		return false
+	}
+	id, tail, ok := strings.Cut(rest, "/")
+	if !ok || !isMapID(id) || id == "." || id == ".." {
+		return false
+	}
+	return len(tail) > len("tiles/") && strings.HasPrefix(tail, "tiles/")
+}
+
 // map3dRoute は /map3d/v1/ 以下のパスの使い道を決める。知らないパスは m3None (404)
 func map3dRoute(path string) map3dKind {
 	rest, ok := strings.CutPrefix(path, map3dPrefix)

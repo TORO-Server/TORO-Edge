@@ -118,6 +118,18 @@ type Site struct {
 	// OPTIONS (CORS の preflight) を元に渡すパスの頭と、その処理。空ならこのサイトの OPTIONS は 405
 	optionsPrefix string
 	options       Handler
+	// パススルー (passthrough.go)。nil でなければ、passPath が true を返すパス (passPath が nil なら全部) を、ためずに元へ渡す。
+	// GET / HEAD 以外のメソッドと本文、WebSocket も、パススルーのパスならそのまま渡す
+	pass     *Passthrough
+	passPath func(path string) bool
+}
+
+// passFor は path をパススルーで渡すなら、その渡し先
+func (s *Site) passFor(path string) *Passthrough {
+	if s.pass != nil && (s.passPath == nil || s.passPath(path)) {
+		return s.pass
+	}
+	return nil
 }
 
 // Rule は経路の 1 つ。exact / prefix / fn のどれか 1 つを使う。fn は合えば、取り出した部分 (なければ "") と true を返す

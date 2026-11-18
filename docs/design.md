@@ -23,6 +23,22 @@
   - `OPTIONS` (CORS の確認) は、この頭の下だけ元が答える (`Access-Control-Request-*` と `Origin` を渡し、返事はそのまま返す)。ほかのパスの `OPTIONS` は今までどおり 405
 - `/maps/<地図>/live/` は `players.json` `markers.json` `sse` だけで、地図は BlueMap の `settings.json` の `maps` にあるものだけ (読めないときは止めない)
 
+### 統一した入口 (パススルーと assets のタイル)
+
+torosaba.net の Tunnel の転送先を、全ホストでこの edge 1 か所にそろえるための決まりです (経路の定義をここに寄せる)。
+
+- **assets ホストのタイル**: ファイル配信 (`/<12 文字>.<拡張子>` → `/_assets/`、参照元の確認は元の側) とは別の決まりで、タイルを元 (`EDGE_API_BACKEND`) へ渡す。公開 URL は api ホストと同じパスで、ホスト名だけが違う。
+  - 2D: `/map/v1/tiles/<ワールド>/<地図>/<ディレクトリ>/<ファイル>` (`?timestamp=<数字>` だけがクエリとして効く)。api ホストの同じパスと、ためる場所 (名前の空間) も返事の決まりも同じ
+  - 3D: `/map3d/v1/maps/<地図>/tiles/...` (`map3dTile`)。60 秒まとめる (`CDN-Cache-Control: max-age=60`)。`OPTIONS` は `/map3d/v1/maps/` の下だけ元が答える
+  - assets ホストの上記以外の `/map/` と `/map3d/` (configuration、world、ws、settings.json、live など) は元に聞かずに 404。参照元の確認は、タイルには付けない
+- **パススルー** (`passthrough.go`): ためず、読み替えず、本文も全部の頭書きも渡す経路。使うのは、auth、mcp、pass-api の全パスと、api ホストの `/map/` と `/map3d/` 以外の全パス。サイトに `Site.pass` と `Site.passPath` で決める。
+  - 渡す元は環境変数: `EDGE_AUTH_BACKEND`、`EDGE_MCP_BACKEND`、`EDGE_PASSAPI_BACKEND` (`host:port`。決めなければそのホストは受けず、知らない Host と同じ扱い)。api は `EDGE_API_BACKEND` (`EDGE_API_PASSTHROUGH=0` でパススルーを止めると、`/map/` と `/map3d/` の外は 404 に戻る)。Host 名は `EDGE_HOST_AUTH`、`EDGE_HOST_MCP`、`EDGE_HOST_PASSAPI` で変えられる
+  - 先頭を読み終えたリクエストを、つなぎごと内側の net/http サーバー (`httputil.ReverseProxy`) へ渡す。メソッド、本文 (Content-Length も chunked も)、Cookie、Authorization、Location、Set-Cookie、Host (客のもの) はそのまま。返事は流しながら返す (SSE をためない)。WebSocket など Upgrade も渡す
+  - つなぎは 1 リクエストごとに閉じる (`Connection: close`)。続きのリクエストは edge の本体へ戻って振り分けられる
+  - 客が書いた `X-Toro-Client-Ip` は渡さず、`cf-connecting-ip` があるときだけそこから作る。`X-Forwarded-For` は元の値に、つないできた相手を足す
+  - アクセスログにはクエリを出さない (認可コードなどが入りうる)。元に届かないときは 502、頭書きを待つ長さは api 2 分、mcp 5 分、auth と pass-api 1 分
+  - 試験: `conformance/passthrough_test.go`
+
 ### 挙動
 
 - 静的なファイルは起動時にメモリへ読み込み、brotli 11 / gzip 9 を 1 度だけ作る。ETag は内容から。変わったら約 1 秒で読み直す
@@ -34,7 +50,7 @@
 - 流すもの (SSE、動画、大きくてためられないもの) は、ためるための接続と別の口で元につなぐ。遅い客や終わらない返事で、ためる経路を待たせない
 - 1 つの客 (`CF-Connecting-IP`。IPv6 は /64 ごと) が同時に使える数には上限がある (流すもの 64、SSE 8、WebSocket 16)。超えたら 429。中継サービスを通っていない接続は数えない
 - 元に渡す頭書きは決めたものだけ。`X-Toro-Client-IP` を客が書いても渡さない (assets 用のホストでは、客の IP から作る)
-- GET と HEAD だけ。本文のあるリクエストは断ってつなぎを閉じる。8 KB を超える URL は 414
+- 地図の経路は GET と HEAD だけ。本文のあるリクエストは断ってつなぎを閉じる (パススルーのパスは別: 上の「統一した入口」)。8 KB を超える URL は 414
 - 付け足す頭書き (CSP など) は成功の返事にだけ付ける。404 は 2〜5 秒覚える。`/index.html` の 301 は相対の `Location`
 
 ## 作り
