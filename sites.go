@@ -76,6 +76,11 @@ type SiteDeps struct {
 	live          *Upstream
 	dynmapStatic  *StaticSite
 	blueMapStatic *StaticSite
+	// パススルーの渡し先 (nil のサイトは受けない)。api は /map/ と /map3d/ 以外の全部、ほかは全パス
+	apiPass     *Passthrough
+	authPass    *Passthrough
+	mcpPass     *Passthrough
+	passAPIPass *Passthrough
 }
 
 type preloadJob struct {
@@ -133,6 +138,20 @@ func buildSites(d SiteDeps) *Sites {
 	// ───────────── Dynmap の API (設定、ワールドの更新、タイル)。map.torosaba.net の /up/ と /tiles/、api.torosaba.net の /map/v1/ で、パスの頭だけが違う。
 	// どちらも元 (地図サーバー) へ、客が来たパスのまま聞く (頭を削らない)。地図サーバー が付ける Access-Control-Allow-Origin は、そのまま返す
 	// up は元 (map.torosaba.net は 地図サーバー、api.torosaba.net は ApiBackend)
+	// 地図のタイル、マーカー、プレイヤーの顔。キャッシュの長さは 地図サーバー の Cache-Control に従う (なければ 5 分)
+	// 描き直したタイルは ?timestamp= で別の URL になる (クエリはこれだけを見る)
+	tilesRule := func(up *Upstream, ns *nsCache, prefix string) Rule {
+		return prefixRule(prefix, proxiedVia(up, ns, func(o *CachedOptions) {
+			o.key = func(c *Ctx) string {
+				if q := tileQuery(c.search); q != "" {
+					return c.path + "?" + q
+				}
+				return c.path
+			}
+			o.path = func(c *Ctx) (string, string) { return c.path, tileQuery(c.search) }
+			o.defaultTtl, o.maxTtl, o.swr, o.negativeTtl, o.log = 5*min, day, 30*sec, 2*sec, false
+		}))
+	}
 	dynmapAPI := func(up *Upstream, ns *nsCache, p dynmapPaths) []Rule {
 		return []Rule{
 			// 設定とワールドの更新。全員が 2 秒ごとに読むので、ワールドごとに 1 秒だけまとめる (中身は時刻によらず同じ)
@@ -146,18 +165,7 @@ func buildSites(d SiteDeps) *Sites {
 				o.path = func(c *Ctx) (string, string) { return p.world + c.cap + "/0", "" }
 				o.fixedTtl, o.swr, o.negativeTtl = sec, 2*sec, 2*sec
 			})),
-			// 地図のタイル、マーカー、プレイヤーの顔。キャッシュの長さは 地図サーバー の Cache-Control に従う (なければ 5 分)
-			// 描き直したタイルは ?timestamp= で別の URL になる (クエリはこれだけを見る)
-			prefixRule(p.tiles, proxiedVia(up, ns, func(o *CachedOptions) {
-				o.key = func(c *Ctx) string {
-					if q := tileQuery(c.search); q != "" {
-						return c.path + "?" + q
-					}
-					return c.path
-				}
-				o.path = func(c *Ctx) (string, string) { return c.path, tileQuery(c.search) }
-				o.defaultTtl, o.maxTtl, o.swr, o.negativeTtl, o.log = 5*min, day, 30*sec, 2*sec, false
-			})),
+			tilesRule(up, ns, p.tiles),
 		}
 	}
 	// ───────────── map.torosaba.net (Dynmap)
@@ -361,7 +369,6 @@ func buildSites(d SiteDeps) *Sites {
 			log:           false,
 			limit:         streamLimit,
 		})),
-		prefixRule("/", notFound),
 	}
 
 	// ───────────── api.torosaba.net の /map/v1/ (Dynmap の API。ブラウザは map.torosaba.net の画面から、別のオリジンとして読む)
@@ -370,7 +377,9 @@ func buildSites(d SiteDeps) *Sites {
 	// 振り分け先は cfg.ApiBackend (既定は 地図サーバー。EDGE_API_BACKEND で別の API サーバーへ変える)。ためる場所 (名前の空間) は元を変えても同じ
 	// WebSocket は apiWSPaths の頭ごとに 1 本 (/map3d/v1/ws も同じ)。WebSocket でない GET は 426
 	apiWSPaths := []string{"/map/v1/ws", map3dPrefix + "ws"}
-	apiRules := slices.Concat([]Rule{deny}, dynmapAPI(d.apiBack, d.cache.space(), dynmapPaths{config: "/map/v1/configuration", world: "/map/v1/world/", tiles: "/map/v1/tiles/"}))
+	// 2D のタイルは api ホストと assets ホストで同じパス (/map/v1/tiles/) を同じ元から取るので、ためる場所 (名前の空間) も同じにする
+	nsApiMap := d.cache.space()
+	apiRules := slices.Concat([]Rule{deny}, dynmapAPI(d.apiBack, nsApiMap, dynmapPaths{config: "/map/v1/configuration", world: "/map/v1/world/", tiles: "/map/v1/tiles/"}))
 	for _, p := range apiWSPaths {
 		apiRules = append(apiRules, exactRule(p, upgradeRequired))
 	}
@@ -480,10 +489,28 @@ func buildSites(d SiteDeps) *Sites {
 		limit:         streamLimit,
 	})
 	apiRules = append(apiRules, prefixRule("/", notFound))
+	// api ホストのパススルー: /map/ と /map3d/ は上の決まりで返す (知らないパスは 404)。それ以外は全部 toro-api へ (パス条件なし)
+	apiPassPath := func(p string) bool { return !strings.HasPrefix(p, "/map/") && !strings.HasPrefix(p, "/map3d/") }
+
+	// ───────────── assets.torosaba.net のタイル (2D と 3D)
+	// 公開 URL は api ホストと同じパス (ホスト名だけが違う): 2D は /map/v1/tiles/<ワールド>/<地図>/<ディレクトリ>/<ファイル>、3D は /map3d/v1/maps/<地図>/tiles/<lod>/...。
+	// 元 (toro-api) には同じパスのまま聞く (頭を削らない)。ファイル配信 (上の /<12 文字>.<拡張子>) と違い、参照元は確かめず、Cloudflare にためさせてよい返事を返す。
+	// ためる場所と返事の頭書きは api ホストの同じパスと同じ (nsApiMap、ns3d、api3dData)。それ以外の /map/ と /map3d/ は assets ホストでは 404
+	assetRules = append(assetRules,
+		tilesRule(d.apiBack, nsApiMap, "/map/v1/tiles/"),
+		fnRule(func(p string) (string, bool) { return "", map3dTile(p) }, api3dData),
+		prefixRule("/", notFound),
+	)
+	assetRules = append([]Rule{deny}, assetRules...)
+
 	mapSite := &Site{name: "map", wsPaths: []string{"/up/ws"}, wsTarget: cfg.MapWeb, route: compileRules(mapRules)}
 	blueSite := &Site{name: "bluemap", wsPaths: []string{"/up/ws"}, wsTarget: cfg.MapWeb, route: compileRules(blueRules)}
-	assetSite := &Site{name: "assets", route: compileRules(assetRules)}
-	apiSite := &Site{name: "api", wsPaths: apiWSPaths, wsTarget: cfg.ApiBackend, route: compileRules(apiRules), optionsPrefix: map3dPrefix, options: api3dOptions}
+	// preflight (OPTIONS) は 3D のタイルのパスだけ元へ渡す (Range などの頭書きを付けて別オリジンから読むとき)
+	assetSite := &Site{name: "assets", route: compileRules(assetRules), optionsPrefix: map3dPrefix + "maps/", options: api3dOptions}
+	apiSite := &Site{name: "api", wsPaths: apiWSPaths, wsTarget: cfg.ApiBackend, route: compileRules(apiRules), optionsPrefix: map3dPrefix, options: api3dOptions, pass: d.apiPass, passPath: apiPassPath}
+	authSite := &Site{name: "auth", pass: d.authPass}
+	mcpSite := &Site{name: "mcp", pass: d.mcpPass}
+	passAPISite := &Site{name: "pass-api", pass: d.passAPIPass}
 
 	byHost := map[string]*Site{}
 	for _, h := range cfg.HostsMap {
@@ -497,6 +524,18 @@ func buildSites(d SiteDeps) *Sites {
 	}
 	for _, h := range cfg.HostsApi {
 		byHost[h] = apiSite
+	}
+	// パススルーの渡し先が決まっていないサイトは、Host があっても受けない (知らない Host として扱う)
+	for _, s := range []struct {
+		hosts []string
+		site  *Site
+	}{{cfg.HostsAuth, authSite}, {cfg.HostsMcp, mcpSite}, {cfg.HostsPassApi, passAPISite}} {
+		if s.site.pass == nil {
+			continue
+		}
+		for _, h := range s.hosts {
+			byHost[h] = s.site
+		}
 	}
 
 	return &Sites{

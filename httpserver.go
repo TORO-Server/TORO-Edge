@@ -166,6 +166,8 @@ type conn struct {
 	scratch []byte
 	dbg     []byte
 	chunk   [24]byte
+	// 読んだリクエストの先頭 (1 行目と頭書き、最後の空行まで) のそのままの写し。パススルーのサイトが net/http へ渡すときに使う
+	rawHead []byte
 }
 
 func (s *Server) serveConn(nc net.Conn) {
@@ -257,6 +259,7 @@ func (cn *conn) readRequest() (int, error) {
 		}
 		return 0, err
 	}
+	cn.rawHead = append(cn.rawHead[:0], line...)
 	total := len(line)
 	if len(line) < 2 || line[len(line)-2] != '\r' {
 		return http.StatusBadRequest, errBadRequest
@@ -313,6 +316,7 @@ func (cn *conn) readRequest() (int, error) {
 		if total > maxHeaderBytes {
 			return http.StatusRequestHeaderFieldsTooLarge, errBadRequest
 		}
+		cn.rawHead = append(cn.rawHead, line...)
 		if len(line) == 2 && line[0] == '\r' {
 			break
 		}
