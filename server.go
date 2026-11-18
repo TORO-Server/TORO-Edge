@@ -26,6 +26,8 @@ type Edge struct {
 	log       *AccessLog
 	out       io.Writer
 	srv       *Server
+	passes    []*Passthrough
+	handoff   *Handoff
 	admin     *http.Server
 	stop      chan struct{}
 	Port      int
@@ -50,7 +52,26 @@ func startEdge(cfg Config, out io.Writer) (*Edge, error) {
 	}
 	dyn := newStaticSite(cfg.DynmapWeb)
 	blue := newStaticSite(cfg.BlueMapWeb, "maps")
-	e.sites = buildSites(SiteDeps{config: cfg, cache: e.cache, mapWeb: e.mapWeb, apiBack: e.apiBack, live: e.live, dynmapStatic: dyn, blueMapStatic: blue})
+	// パススルー (passthrough.go)。元が決まっているサイトだけ作る。待つ長さ (頭書きが届くまで) は、mcp は長く (ツールの実行)、ほかは 1〜2 分
+	deps := SiteDeps{config: cfg, cache: e.cache, mapWeb: e.mapWeb, apiBack: e.apiBack, live: e.live, dynmapStatic: dyn, blueMapStatic: blue}
+	mk := func(name string, ep Endpoint, wait time.Duration) *Passthrough {
+		if ep.Host == "" {
+			return nil
+		}
+		p := newPassthrough(name, ep, wait)
+		e.passes = append(e.passes, p)
+		return p
+	}
+	if cfg.ApiPassthrough {
+		deps.apiPass = mk("api", cfg.ApiBackend, 2*time.Minute)
+	}
+	deps.authPass = mk("auth", cfg.AuthBackend, time.Minute)
+	deps.mcpPass = mk("mcp", cfg.McpBackend, 5*time.Minute)
+	deps.passAPIPass = mk("pass-api", cfg.PassApiBackend, time.Minute)
+	if len(e.passes) > 0 {
+		e.handoff = newHandoff()
+	}
+	e.sites = buildSites(deps)
 
 	// 静的なファイルは、起動してすぐ返せるよう裏で読んでおく (読み終わるまでは、そのつどディスクから読む)
 	for _, p := range e.sites.preload {
@@ -100,17 +121,22 @@ func (e *Edge) siteFor(r *Request) *Site {
 func (e *Edge) handle(c *Ctx) {
 	req := c.req
 	cn := c.conn
+	site := e.siteFor(req)
+	if len(req.Target) > 8192 {
+		sendText(c, http.StatusRequestURITooLong, "URI Too Long\n")
+		return
+	}
+	// パススルーのパスは、メソッドも本文も頭書きも問わず、net/http へつなぎごと渡す (passthrough.go)
+	if p := site.passFor(c.path); p != nil {
+		e.servePass(c, p)
+		return
+	}
 	// 本文があるリクエストは受けない (読み飛ばさず、つなぎごと閉じる)
 	if req.hasBody {
 		cn.closeAfter = true
 		sendText(c, http.StatusBadRequest, "Bad Request\n")
 		return
 	}
-	if len(req.Target) > 8192 {
-		sendText(c, http.StatusRequestURITooLong, "URI Too Long\n")
-		return
-	}
-	site := e.siteFor(req)
 	defer func() {
 		if rec := recover(); rec != nil {
 			fmt.Fprintf(e.out, "error %s %s: %v\n", c.method, c.path, rec)
@@ -250,5 +276,11 @@ func (e *Edge) close(grace time.Duration) {
 		e.apiBack.close()
 	}
 	e.live.close()
+	if e.handoff != nil {
+		e.handoff.close()
+	}
+	for _, p := range e.passes {
+		p.close()
+	}
 	e.log.flush()
 }

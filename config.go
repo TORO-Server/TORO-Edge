@@ -33,6 +33,16 @@ type Config struct {
 	HostsAssets  []string
 	// api.torosaba.net の /map/v1/ (Dynmap の API。ほかのパスは Tunnel が toro-api へ渡すので、ここには来ない)
 	HostsApi []string
+	// パススルーするサイト (ためず、読み替えず、本文も全部の頭書きも渡す)。Backend の Host が空のサイトは、受けない (Host の指定だけがあっても、元が決まるまで効かない)。
+	// auth.torosaba.net (共通認証)、mcp.torosaba.net (AI コネクタ。SSE)、pass-api.torosaba.net (toro-main の中の受け口)
+	HostsAuth      []string
+	HostsMcp       []string
+	HostsPassApi   []string
+	AuthBackend    Endpoint
+	McpBackend     Endpoint
+	PassApiBackend Endpoint
+	// api.torosaba.net の /map/ と /map3d/ 以外の全部を、ApiBackend へパススルーするか (EDGE_API_PASSTHROUGH=0 で止める。止めると 404 に戻る)
+	ApiPassthrough bool
 	// 地図のデータをためる上限 (バイト)
 	CacheBytes int64
 	// これより大きい返事はためずに流す (バイト)
@@ -88,6 +98,14 @@ func hostList(value string, fallback string) []string {
 	return out
 }
 
+// optEndpoint は決めていなければ空の Endpoint (Host が空) を返す
+func optEndpoint(env map[string]string, key string, defaultPort int) Endpoint {
+	if v := envOr(env, key, ""); v != "" {
+		return endpoint(v, defaultPort)
+	}
+	return Endpoint{}
+}
+
 func loadConfig(env map[string]string) Config {
 	cacheBytes := int64(2048) << 20
 	if v := envOr(env, "EDGE_CACHE_BYTES", ""); v != "" {
@@ -125,6 +143,13 @@ func loadConfig(env map[string]string) Config {
 		HostsBlueMap:    hostList(env["EDGE_HOST_BLUEMAP"], "3d-map.torosaba.net"),
 		HostsAssets:     hostList(env["EDGE_HOST_ASSETS"], "assets.torosaba.net"),
 		HostsApi:        hostList(env["EDGE_HOST_API"], "api.torosaba.net"),
+		HostsAuth:       hostList(env["EDGE_HOST_AUTH"], "auth.torosaba.net"),
+		HostsMcp:        hostList(env["EDGE_HOST_MCP"], "mcp.torosaba.net"),
+		HostsPassApi:    hostList(env["EDGE_HOST_PASSAPI"], "pass-api.torosaba.net"),
+		AuthBackend:     optEndpoint(env, "EDGE_AUTH_BACKEND", 80),
+		McpBackend:      optEndpoint(env, "EDGE_MCP_BACKEND", 80),
+		PassApiBackend:  optEndpoint(env, "EDGE_PASSAPI_BACKEND", 80),
+		ApiPassthrough:  env["EDGE_API_PASSTHROUGH"] != "0",
 		CacheBytes:      cacheBytes,
 		MaxEntityBytes:  maxEntity,
 		AccessLog:       env["EDGE_ACCESS_LOG"] != "0",

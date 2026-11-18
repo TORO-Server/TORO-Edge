@@ -302,6 +302,8 @@ type config struct {
 	maxEntityBytes int
 	// nil は実装の既定。0 なら、大きい本文も write で送る
 	sendfileMin *int
+	// 追加の環境変数 (KEY=value)。パススルーの試験が、auth や mcp の元を決めるのに使う
+	extraEnv []string
 }
 
 type edgeHandle struct {
@@ -332,6 +334,7 @@ func startBinary(t *testing.T, c config) *edgeHandle {
 	if c.sendfileMin != nil {
 		env = append(env, "EDGE_SENDFILE_MIN="+strconv.Itoa(*c.sendfileMin))
 	}
+	env = append(env, c.extraEnv...)
 	// 外の EDGE_* は渡さない (試験の設定を乱さないため)。それ以外 (PATH、Windows の SYSTEMROOT など) は渡す
 	for _, kv := range os.Environ() {
 		if !strings.HasPrefix(kv, "EDGE_") {

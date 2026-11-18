@@ -1196,12 +1196,21 @@ func TestApiHost(t *testing.T) {
 		eq(t, e.api("/map/v1/tiles/_markers_/marker_main.json").status, 200)
 		eq(t, e.api("/map/v1/tiles/faces/16x16/x.png").status, 200)
 
-		// /map/v1/ の外は、元に聞かずに 404 (toro-api のものは Tunnel が先に振り分けるので、ここには来ない)
+		// /map/ の下の知らないパスは、元に聞かずに 404
 		seen := e.mapweb.seenLen()
-		for _, p := range []string{"/", "/server/status", "/docs/list", "/up/configuration", "/tiles/main/x", "/map/v1", "/map/v1/other", "/live/clients", "/images/blank.png", "/x.php"} {
+		for _, p := range []string{"/map/v1", "/map/v1/other", "/map/other"} {
 			eq(t, e.api(p).status, 404, p)
 		}
 		eq(t, e.mapweb.seenLen(), seen)
+		// /map/ と /map3d/ の外は、パススルーで全部 toro-api (ここでは元) へ (パス条件なし。以前は Tunnel が振り分けていた)
+		outside := []string{"/", "/server/status", "/docs/list", "/up/configuration", "/tiles/main/x", "/live/clients", "/images/blank.png", "/x.php", "/map", "/mapx/v1"}
+		for _, p := range outside {
+			eq(t, e.api(p).status, 200, p)
+		}
+		eq(t, e.mapweb.seenLen(), seen+len(outside))
+		eq(t, e.mapweb.seenAt(seen).URL, "/")
+		eq(t, e.mapweb.seenAt(seen+1).URL, "/server/status")
+		seen = e.mapweb.seenLen()
 
 		// map.torosaba.net は今までどおり: /up/ は元へ、/map/v1/ は持たない
 		eq(t, e.get("/up/configuration").status, 200)
@@ -1242,8 +1251,9 @@ func TestApiHostWebSocket(t *testing.T) {
 		eq(t, seen.Header.Get("Origin"), "https://map.torosaba.net")
 		eq(t, seen.Header.Get("Host"), "api.torosaba.net")
 
-		// 断るもの: api の /map/v1/ws 以外、map の /map/v1/ws、api の /up/ws
-		for _, c := range [][2]string{{"/map/v1/other", "api.torosaba.net"}, {"/up/ws", "api.torosaba.net"}, {"/server/status", "api.torosaba.net"}, {"/map/v1/ws", "map.torosaba.net"}, {"/map/v1/ws", "3d-map.torosaba.net"}, {"/map/v1/ws", "assets.torosaba.net"}} {
+		// 断るもの: api の /map/ の下の /map/v1/ws 以外、map の /map/v1/ws。
+		// (api の /map/ と /map3d/ の外は、パススルーで元へ渡る。WebSocket もそのまま渡るので、ここでは断らない: passthrough_test.go)
+		for _, c := range [][2]string{{"/map/v1/other", "api.torosaba.net"}, {"/map/v1/ws", "map.torosaba.net"}, {"/map/v1/ws", "3d-map.torosaba.net"}, {"/map/v1/ws", "assets.torosaba.net"}} {
 			r, err := request(e.edge.port, c[0], reqOpts{host: c[1], headers: hdr("connection", "Upgrade", "upgrade", "websocket")})
 			if err != nil {
 				t.Fatalf("%s%s: %v", c[1], c[0], err)
@@ -1399,9 +1409,12 @@ func TestApiMap3d(t *testing.T) {
 		eq(t, last().Header.Get("Access-Control-Request-Method"), "GET")
 		// /map3d/v1/ の外の OPTIONS は今までどおり 405 (元へ行かない)
 		eq(t, e.api("/map/v1/configuration", reqOpts{method: "OPTIONS"}).status, 405)
-		eq(t, e.api("/other", reqOpts{method: "OPTIONS"}).status, 405)
 		eq(t, e.get("/map3d/v1/maps/overworld/settings.json", reqOpts{method: "OPTIONS"}).status, 405)
 		eq(t, e.apiback.seenLen(), n+1)
+		// /map/ と /map3d/ の外は、パススルーなので OPTIONS も元へ渡る (元のサーバーが答える)
+		eq(t, e.api("/other", reqOpts{method: "OPTIONS"}).status, 204)
+		eq(t, e.apiback.seenLen(), n+2)
+		n++
 
 		// 知らないパスは、元に聞かずに 404
 		n = e.apiback.seenLen()
