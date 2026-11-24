@@ -126,8 +126,7 @@ func (s *Server) Serve(ln net.Listener) error {
 			if s.closing.Load() {
 				return nil
 			}
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
+			if isTemporaryAcceptError(err) {
 				if delay == 0 {
 					delay = 5 * time.Millisecond
 				} else if delay *= 2; delay > time.Second {

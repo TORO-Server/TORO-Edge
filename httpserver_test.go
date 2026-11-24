@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -466,3 +468,93 @@ func TestManyConcurrentConnections(t *testing.T) {
 		}
 	}
 }
+
+type flakyAcceptListener struct {
+	net.Listener
+	mu     sync.Mutex
+	errors []error
+}
+
+func (l *flakyAcceptListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if len(l.errors) > 0 {
+		err := l.errors[0]
+		l.errors = l.errors[1:]
+		l.mu.Unlock()
+		return nil, err
+	}
+	l.mu.Unlock()
+	return l.Listener.Accept()
+}
+
+func TestServeRetriesResourceExhaustionAcceptErrors(t *testing.T) {
+	base := listen(t)
+	flaky := &flakyAcceptListener{
+		Listener: base,
+		errors:   []error{syscall.EMFILE, syscall.ENOMEM},
+	}
+	srv := newServer(testHandler, func(c *Ctx) {})
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- srv.Serve(flaky)
+	}()
+	t.Cleanup(func() { srv.Shutdown(200 * time.Millisecond) })
+
+	c, br := dial(t, base.Addr().String())
+	io.WriteString(c, "GET /x HTTP/1.1\r\nHost: a\r\n\r\n")
+	resp, body := readResp(t, br, "GET")
+	if resp.StatusCode != 200 || string(body) != "ok\n" {
+		t.Fatalf("unexpected response after transient accept errors: %d %q", resp.StatusCode, body)
+	}
+	select {
+	case err := <-serveDone:
+		t.Fatalf("Serve exited prematurely on transient error: %v", err)
+	default:
+	}
+}
+
+func TestEdgeReportsServeErrorAndFailsHealthz(t *testing.T) {
+	edge := &Edge{
+		srv:      newServer(testHandler, func(c *Ctx) {}),
+		serveErr: make(chan error, 1),
+	}
+	flaky := &flakyAcceptListener{
+		Listener: listen(t),
+		errors:   []error{errors.New("permanent accept failure")},
+	}
+	defer flaky.Close()
+	go func() {
+		if err := edge.srv.Serve(flaky); err != nil && !edge.srv.closing.Load() {
+			edge.srvFailed.Store(true)
+			select {
+			case edge.serveErr <- err:
+			default:
+			}
+		}
+	}()
+	select {
+	case err := <-edge.serveErr:
+		if err == nil {
+			t.Fatal("expected non-nil serve error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for serveErr")
+	}
+
+	req, _ := http.NewRequest("GET", "http://127.0.0.1/healthz", nil)
+	rec := &responseRecorder{header: make(http.Header)}
+	edge.serveAdmin(rec, req)
+	if rec.status != 503 {
+		t.Fatalf("healthz status = %d, want 503", rec.status)
+	}
+}
+
+type responseRecorder struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (r *responseRecorder) Header() http.Header         { return r.header }
+func (r *responseRecorder) Write(b []byte) (int, error) { return r.body.Write(b) }
+func (r *responseRecorder) WriteHeader(statusCode int)  { r.status = statusCode }

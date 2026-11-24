@@ -40,7 +40,13 @@ func main() {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-	s := <-sig
-	fmt.Printf("%s: shutting down\n", s)
-	edge.close(time.Duration(cfg.ShutdownGraceMs) * time.Millisecond)
+	select {
+	case s := <-sig:
+		fmt.Printf("%s: shutting down\n", s)
+		edge.close(time.Duration(cfg.ShutdownGraceMs) * time.Millisecond)
+	case err := <-edge.serveErr:
+		fmt.Fprintf(os.Stderr, "edge listener exited: %v\n", err)
+		edge.close(time.Duration(cfg.ShutdownGraceMs) * time.Millisecond)
+		os.Exit(1)
+	}
 }

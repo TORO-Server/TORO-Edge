@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +27,8 @@ type Edge struct {
 	log       *AccessLog
 	out       io.Writer
 	srv       *Server
+	srvFailed atomic.Bool
+	serveErr  chan error
 	passes    []*Passthrough
 	handoff   *Handoff
 	admin     *http.Server
@@ -104,7 +107,17 @@ func startEdge(cfg Config, out io.Writer) (*Edge, error) {
 		mux.HandleFunc("/debug/pprof/trace", adminOnly(pprof.Trace))
 	}
 	e.admin = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	go e.srv.Serve(ln)
+	e.serveErr = make(chan error, 1)
+	go func() {
+		if err := e.srv.Serve(ln); err != nil && !e.srv.closing.Load() {
+			e.srvFailed.Store(true)
+			fmt.Fprintf(e.out, "http server stopped: %v\n", err)
+			select {
+			case e.serveErr <- err:
+			default:
+			}
+		}
+	}()
 	go e.admin.Serve(aln)
 	go e.cache.sweepLoop(e.stop)
 	return e, nil
@@ -235,11 +248,12 @@ func (e *Edge) serveAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case path == "/healthz":
+		ok := !closing && !e.srvFailed.Load()
 		status := 200
-		if closing {
+		if !ok {
 			status = 503
 		}
-		reply(status, map[string]bool{"ok": !closing})
+		reply(status, map[string]bool{"ok": ok})
 	case path == "/stats":
 		entries, bytes, evictions := e.cache.stats()
 		var ms runtime.MemStats
